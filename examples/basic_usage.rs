@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut rng = OsRng;
 
     // Generate key pairs
-    println!("1️⃣ Generating post-quantum key pairs...");
+    println!("📊 Step 1: Generating post-quantum key pairs...");
     let encryption_keypair = KeyPair::generate_mlkem768(&mut rng)?;
     let signing_keypair = KeyPair::generate_mldsa65(&mut rng)?;
 
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Basic encryption/decryption
-    println!("2️⃣ Basic encryption and decryption...");
+    println!("🔑 Step 2: Basic encryption and decryption...");
     let message = b"Hello, post-quantum world!";
     println!(
         "📝 Original message: \"{}\"",
@@ -40,7 +40,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Decrypt
     let decrypted = decrypt_message(encryption_keypair.private_key(), &encrypted, None)?;
     println!(
-        "🔓 Message decrypted: \"{}\"",
+        "✅ Message decrypted: \"{}\"",
         String::from_utf8_lossy(&decrypted)
     );
 
@@ -50,13 +50,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Basic signing/verification
-    println!("3️⃣ Basic signing and verification...");
+    println!("✍️ Step 3: Basic signing and verification...");
     let document = b"This document is signed with post-quantum cryptography.";
     println!("📄 Document: \"{}\"", String::from_utf8_lossy(document));
 
     // Sign
     let signature = sign_message(signing_keypair.private_key(), document, None)?;
-    println!("✍️ Document signed with ML-DSA-65");
+    println!("✅ Document signed with ML-DSA-65");
 
     // Verify
     verify_signature(signing_keypair.public_key(), document, &signature)?;
