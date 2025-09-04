@@ -59,13 +59,13 @@
 {% if has_result %}
 <div class="card">
     <h2>✅ Message Signed Successfully</h2>
-    <p>Your message has been signed with a quantum-resistant digital signature. Share both the original message and signature for verification.</p>
+    <p>Your message has been signed with a quantum-resistant digital signature in traditional PGP format. This includes both the cleartext message and signature for easy verification.</p>
     
     <div class="form-group">
-        <label for="signature_output">Digital Signature (PGP Armored):</label>
+        <label for="signature_output">PGP Signed Message (Ready to Share):</label>
         <div class="code-block">{{ result.as_ref().unwrap() }}</div>
         <small style="color: #718096; display: block; margin-top: 10px;">
-            💡 This signature can be verified by anyone with your public key to confirm you authored the message and it hasn't been tampered with.
+            💡 This signed message can be shared directly - it contains both your message and signature. Recipients can verify it with your public key.
         </small>
     </div>
     

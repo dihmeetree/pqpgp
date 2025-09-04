@@ -1593,8 +1593,8 @@ async fn sign_message(
         }
     };
 
-    // Serialize and armor
-    let serialized = match bincode::serialize(&signature) {
+    // Serialize signature for the signed message armor
+    let signature_data = match bincode::serialize(&signature) {
         Ok(ser) => ser,
         Err(e) => {
             error!("Serialization failed for signature: {:?}", e);
@@ -1614,15 +1614,16 @@ async fn sign_message(
         }
     };
 
-    let armored = match encode(&serialized, ArmorType::Signature) {
+    // Create PGP signed message armor (includes cleartext + signature)
+    let signed_message_armor = match create_signed_message(&form.data.message, &signature_data) {
         Ok(arm) => arm,
         Err(e) => {
-            error!("ASCII armor encoding failed for signature: {:?}", e);
+            error!("Failed to create signed message armor: {:?}", e);
             let csrf_token = get_csrf_token(&session, &csrf_store)
                 .await
                 .unwrap_or_default();
             let template = create_error_template(
-                "Failed to encode signature. Please try again.".to_string(),
+                "Failed to create signed message. Please try again.".to_string(),
                 &all_entries,
                 csrf_token,
             );
@@ -1654,7 +1655,7 @@ async fn sign_message(
 
     let template = SignTemplate {
         signing_keys,
-        result: Some(armored),
+        result: Some(signed_message_armor),
         error: None,
         has_result: true,
         has_error: false,
