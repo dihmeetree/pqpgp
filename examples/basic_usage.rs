@@ -17,8 +17,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Generate key pairs
     println!("📊 Step 1: Generating post-quantum key pairs...");
-    let encryption_keypair = KeyPair::generate_mlkem1024(&mut rng)?;
-    let signing_keypair = KeyPair::generate_mldsa87(&mut rng)?;
+    let encryption_keypair = KeyPair::generate_mlkem1024()?;
+    let signing_keypair = KeyPair::generate_mldsa87()?;
 
     println!("✅ Generated keys:");
     println!("   Encryption key ID: {:016X}", encryption_keypair.key_id());

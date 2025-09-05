@@ -29,7 +29,7 @@ use rand::rngs::OsRng;
 
 // Generate hybrid key pairs (encryption + signing)
 let mut rng = OsRng;
-let (enc_keypair, sign_keypair) = KeyPair::generate_hybrid(&mut rng)?;
+let (enc_keypair, sign_keypair) = KeyPair::generate_hybrid()?
 
 // Optionally protect private keys with password
 let password = Password::new("secure_password123".to_string());
@@ -127,7 +127,7 @@ PQPGP supports optional password-based encryption of private keys using industry
 use pqpgp::crypto::{KeyPair, Password};
 
 // Generate key pair
-let mut keypair = KeyPair::generate_mlkem1024(&mut rng)?;
+let mut keypair = KeyPair::generate_mlkem1024()?;
 
 // Protect with password
 let password = Password::new("my_secure_password".to_string());

@@ -90,8 +90,7 @@ fn fuzz_user_id_parsing() {
 /// Test encryption with extreme message sizes
 #[test]
 fn fuzz_message_sizes() {
-    let mut rng = OsRng;
-    let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+    let keypair = KeyPair::generate_mlkem1024().unwrap();
 
     // Test various message sizes including edge cases
     let sizes = vec![
@@ -318,8 +317,7 @@ fn fuzz_concurrent_operations() {
     use std::sync::Arc;
     use std::thread;
 
-    let mut rng = OsRng;
-    let keypair = Arc::new(KeyPair::generate_mlkem1024(&mut rng).unwrap());
+    let keypair = Arc::new(KeyPair::generate_mlkem1024().unwrap());
 
     let handles: Vec<_> = (0..10)
         .map(|_| {

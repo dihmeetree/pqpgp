@@ -608,13 +608,11 @@ impl Default for KeyringManager {
 mod tests {
     use super::*;
     use crate::crypto::KeyPair;
-    use rand::rngs::OsRng;
     use tempfile::TempDir;
 
     #[test]
     fn test_key_entry_creation() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let entry = KeyEntry::from_keypair(&keypair, Some("test@example.com".to_string()));
 
@@ -627,8 +625,7 @@ mod tests {
 
     #[test]
     fn test_public_keyring_operations() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
         let mut keyring = PublicKeyring::new();
 
         let entry =
@@ -664,8 +661,7 @@ mod tests {
 
     #[test]
     fn test_private_keyring_operations() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
         let mut keyring = PrivateKeyring::new();
 
         let entry = KeyEntry::from_keypair(&keypair, Some("bob@example.com".to_string()));
@@ -691,8 +687,7 @@ mod tests {
 
     #[test]
     fn test_keyring_manager() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
         let mut manager = KeyringManager::new();
 
         let key_id = keypair.key_id();
@@ -725,8 +720,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let keyring_path = temp_dir.path().to_path_buf();
 
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
         let key_id = keypair.key_id();
 
         // Create and save keyring
@@ -751,8 +745,7 @@ mod tests {
 
     #[test]
     fn test_key_expiration() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let mut entry = KeyEntry::from_keypair(&keypair, None);
         assert!(!entry.is_expired());
@@ -778,8 +771,7 @@ mod tests {
 
     #[test]
     fn test_key_trust() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let mut entry = KeyEntry::from_keypair(&keypair, None);
         assert!(!entry.trusted);
@@ -790,8 +782,7 @@ mod tests {
 
     #[test]
     fn test_multiple_user_ids() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let mut entry = KeyEntry::from_keypair(&keypair, Some("primary@example.com".to_string()));
         entry.add_user_id("secondary@example.com".to_string());

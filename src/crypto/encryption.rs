@@ -122,7 +122,7 @@ impl fmt::Display for EncryptedMessage {
 /// use rand::rngs::OsRng;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut rng = OsRng;
-/// let recipient_keypair = KeyPair::generate_mlkem1024(&mut rng)?;
+/// let recipient_keypair = KeyPair::generate_mlkem1024()?;
 /// let message = b"Hello, post-quantum world!";
 /// let encrypted = encrypt_message(recipient_keypair.public_key(), message, &mut rng)?;
 /// # Ok(())
@@ -215,7 +215,7 @@ pub fn encrypt_message<R: CryptoRng + RngCore>(
 /// use rand::rngs::OsRng;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut rng = OsRng;
-/// let keypair = KeyPair::generate_mlkem1024(&mut rng)?;
+/// let keypair = KeyPair::generate_mlkem1024()?;
 /// let message = b"Hello, post-quantum world!";
 /// let encrypted = encrypt_message(keypair.public_key(), message, &mut rng)?;
 /// let decrypted = decrypt_message(keypair.private_key(), &encrypted, None)?;
@@ -237,7 +237,8 @@ pub fn decrypt_message(
 
     // Verify key ID matches using constant-time comparison
     if !crate::crypto::key_ids_equal(private_key.key_id(), encrypted_message.recipient_key_id) {
-        return Err(PqpgpError::message(
+        // Use timing-safe error to prevent key enumeration attacks
+        return crate::crypto::TimingSafeError::delayed_error(PqpgpError::message(
             "Key ID doesn't match encrypted message recipient",
         ));
     }
@@ -361,7 +362,7 @@ mod tests {
     #[test]
     fn test_hybrid_encryption_decryption() {
         let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let message = b"Hello, post-quantum hybrid encryption!";
 
@@ -384,7 +385,7 @@ mod tests {
     #[test]
     fn test_encryption_with_wrong_key_type_fails() {
         let mut rng = OsRng;
-        let signing_keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let signing_keypair = KeyPair::generate_mldsa87().unwrap();
 
         let message = b"Test message";
 
@@ -395,8 +396,8 @@ mod tests {
     #[test]
     fn test_decryption_with_wrong_key_fails() {
         let mut rng = OsRng;
-        let keypair1 = KeyPair::generate_mlkem1024(&mut rng).unwrap();
-        let keypair2 = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair1 = KeyPair::generate_mlkem1024().unwrap();
+        let keypair2 = KeyPair::generate_mlkem1024().unwrap();
 
         let message = b"Test message";
         let encrypted = encrypt_message(keypair1.public_key(), message, &mut rng).unwrap();
@@ -408,7 +409,7 @@ mod tests {
     #[test]
     fn test_message_authentication() {
         let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let message = b"Test message";
         let mut encrypted = encrypt_message(keypair.public_key(), message, &mut rng).unwrap();
@@ -425,7 +426,7 @@ mod tests {
     #[test]
     fn test_large_message_encryption() {
         let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         // Create a large message (1MB)
         let large_message = vec![0x42u8; 1024 * 1024];
@@ -439,7 +440,7 @@ mod tests {
     #[test]
     fn test_batch_encryption_decryption() {
         let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let messages = [
             b"First message".as_slice(),
@@ -472,7 +473,7 @@ mod tests {
         }
 
         let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let data = TestData {
             name: "test".to_string(),
@@ -489,7 +490,7 @@ mod tests {
     #[test]
     fn test_encrypted_message_display() {
         let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let message = b"Test message";
         let encrypted = encrypt_message(keypair.public_key(), message, &mut rng).unwrap();

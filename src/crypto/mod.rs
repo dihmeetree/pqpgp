@@ -13,12 +13,12 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Sha3_512};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
-use subtle::ConstantTimeEq;
 
 pub mod encryption;
 pub mod keys;
 pub mod password;
 pub mod signature;
+pub mod timing;
 
 pub use encryption::{
     decrypt_data, decrypt_message, decrypt_messages, encrypt_data, encrypt_message,
@@ -30,6 +30,7 @@ pub use signature::{
     sign_data, sign_message, sign_messages, verify_data_signature, verify_signature,
     verify_signatures, Signature,
 };
+pub use timing::{TimingAnalyzer, TimingSafe, TimingSafeError, TimingStats};
 
 /// Supported post-quantum algorithm identifiers for PGP packets
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,7 +177,8 @@ pub fn generate_key_id(key_material: &[u8], algorithm: Algorithm, created: u64) 
 /// This function compares two 64-bit key IDs in constant time to prevent
 /// information leakage through timing side channels.
 pub fn key_ids_equal(a: u64, b: u64) -> bool {
-    a.to_be_bytes().ct_eq(&b.to_be_bytes()).into()
+    // Use the enhanced timing-safe comparison
+    TimingSafe::bytes_equal(&a.to_be_bytes(), &b.to_be_bytes())
 }
 
 /// Key metadata including creation time, expiration, and usage flags

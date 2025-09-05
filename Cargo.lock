@@ -1259,7 +1259,7 @@ checksum = "94e851c7654eed9e68d7d27164c454961a616cf8c203d500607ef22c737b51bb"
 
 [[package]]
 name = "pqpgp"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes-gcm",
  "argon2",

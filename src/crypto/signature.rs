@@ -100,7 +100,7 @@ impl fmt::Display for Signature {
 /// use rand::rngs::OsRng;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut rng = OsRng;
-/// let keypair = KeyPair::generate_mldsa87(&mut rng)?;
+/// let keypair = KeyPair::generate_mldsa87()?;
 /// let message = b"Hello, post-quantum world!";
 /// let signature = sign_message(keypair.private_key(), message, None)?;
 /// # Ok(())
@@ -166,7 +166,7 @@ pub fn sign_message(
 /// use rand::rngs::OsRng;
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut rng = OsRng;
-/// let keypair = KeyPair::generate_mldsa87(&mut rng)?;
+/// let keypair = KeyPair::generate_mldsa87()?;
 /// let message = b"Hello, post-quantum world!";
 /// let signature = sign_message(keypair.private_key(), message, None)?;
 /// verify_signature(keypair.public_key(), message, &signature)?;
@@ -192,9 +192,10 @@ pub fn verify_signature(
         ));
     }
 
-    // Verify key ID matches
-    if public_key.key_id() != signature.key_id() {
-        return Err(PqpgpError::signature(
+    // Verify key ID matches using constant-time comparison
+    if !crate::crypto::key_ids_equal(public_key.key_id(), signature.key_id()) {
+        // Use timing-safe error to prevent key enumeration attacks
+        return crate::crypto::TimingSafeError::delayed_error(PqpgpError::signature(
             "Key ID doesn't match signature key ID",
         ));
     }
@@ -282,12 +283,10 @@ pub fn verify_data_signature<T: Serialize>(
 mod tests {
     use super::*;
     use crate::crypto::KeyPair;
-    use rand::rngs::OsRng;
 
     #[test]
     fn test_mldsa87_signing() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let message = b"Test message for post-quantum signing";
         let signature = sign_message(keypair.private_key(), message, None).unwrap();
@@ -299,8 +298,7 @@ mod tests {
 
     #[test]
     fn test_signature_verification() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let message = b"Test message for signature verification";
         let signature = sign_message(keypair.private_key(), message, None).unwrap();
@@ -311,8 +309,7 @@ mod tests {
 
     #[test]
     fn test_signature_verification_fails_with_wrong_message() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let message = b"Original message";
         let wrong_message = b"Modified message";
@@ -324,9 +321,8 @@ mod tests {
 
     #[test]
     fn test_signature_verification_fails_with_wrong_key() {
-        let mut rng = OsRng;
-        let keypair1 = KeyPair::generate_mldsa87(&mut rng).unwrap();
-        let keypair2 = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair1 = KeyPair::generate_mldsa87().unwrap();
+        let keypair2 = KeyPair::generate_mldsa87().unwrap();
 
         let message = b"Test message";
         let signature = sign_message(keypair1.private_key(), message, None).unwrap();
@@ -337,8 +333,7 @@ mod tests {
 
     #[test]
     fn test_batch_signing_and_verification() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let messages = [
             b"First message".as_slice(),
@@ -364,8 +359,7 @@ mod tests {
             active: bool,
         }
 
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let data = TestData {
             name: "test".to_string(),
@@ -379,8 +373,7 @@ mod tests {
 
     #[test]
     fn test_encryption_key_cannot_sign() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let message = b"Test message";
 
@@ -390,8 +383,7 @@ mod tests {
 
     #[test]
     fn test_signature_display() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let message = b"Test message";
         let signature = sign_message(keypair.private_key(), message, None).unwrap();

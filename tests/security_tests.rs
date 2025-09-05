@@ -16,7 +16,7 @@ use std::time::Duration;
 #[test]
 fn test_oversized_message_rejected() {
     let mut rng = OsRng;
-    let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+    let keypair = KeyPair::generate_mlkem1024().unwrap();
 
     // Create a message that exceeds the maximum size
     let oversized_message = vec![0u8; MAX_MESSAGE_SIZE + 1];

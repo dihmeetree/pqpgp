@@ -6,26 +6,16 @@ use rand::rngs::OsRng;
 
 fn bench_key_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("key_generation");
-    let mut rng = OsRng;
+    group.bench_function("mlkem1024", |b| b.iter(KeyPair::generate_mlkem1024));
 
-    group.bench_function("mlkem1024", |b| {
-        b.iter(|| KeyPair::generate_mlkem1024(&mut rng))
-    });
-
-    group.bench_function("mldsa87", |b| {
-        b.iter(|| KeyPair::generate_mldsa87(&mut rng))
-    });
+    group.bench_function("mldsa87", |b| b.iter(KeyPair::generate_mldsa87));
 
     group.finish();
 }
 
 fn bench_hybrid_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("hybrid_operations");
-    let mut rng = OsRng;
-
-    group.bench_function("generate_hybrid", |b| {
-        b.iter(|| KeyPair::generate_hybrid(&mut rng))
-    });
+    group.bench_function("generate_hybrid", |b| b.iter(KeyPair::generate_hybrid));
 
     group.finish();
 }
@@ -35,8 +25,8 @@ fn bench_encryption_operations(c: &mut Criterion) {
     let mut rng = OsRng;
 
     // Pre-generate key pairs for consistent benchmarking
-    let mlkem_keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
-    let (hybrid_enc_keypair, _hybrid_sig_keypair) = KeyPair::generate_hybrid(&mut rng).unwrap();
+    let mlkem_keypair = KeyPair::generate_mlkem1024().unwrap();
+    let (hybrid_enc_keypair, _hybrid_sig_keypair) = KeyPair::generate_hybrid().unwrap();
 
     // Test different message sizes
     let small_msg = vec![0u8; 64]; // 64 bytes
@@ -119,8 +109,8 @@ fn bench_decryption_operations(c: &mut Criterion) {
     let mut rng = OsRng;
 
     // Pre-generate key pairs and encrypted messages for consistent benchmarking
-    let mlkem_keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
-    let (hybrid_enc_keypair, _hybrid_sig_keypair) = KeyPair::generate_hybrid(&mut rng).unwrap();
+    let mlkem_keypair = KeyPair::generate_mlkem1024().unwrap();
+    let (hybrid_enc_keypair, _hybrid_sig_keypair) = KeyPair::generate_hybrid().unwrap();
 
     let small_msg = vec![0u8; 64];
     let medium_msg = vec![0u8; 1024];
@@ -213,11 +203,9 @@ fn bench_decryption_operations(c: &mut Criterion) {
 
 fn bench_signature_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("signature_operations");
-    let mut rng = OsRng;
-
     // Pre-generate key pairs for consistent benchmarking
-    let mldsa_keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
-    let (_hybrid_enc_keypair, hybrid_sig_keypair) = KeyPair::generate_hybrid(&mut rng).unwrap();
+    let mldsa_keypair = KeyPair::generate_mldsa87().unwrap();
+    let (_hybrid_enc_keypair, hybrid_sig_keypair) = KeyPair::generate_hybrid().unwrap();
 
     // Test different message sizes
     let small_msg = vec![0u8; 64];
@@ -297,11 +285,9 @@ fn bench_signature_operations(c: &mut Criterion) {
 
 fn bench_verification_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("verification_operations");
-    let mut rng = OsRng;
-
     // Pre-generate key pairs and signatures for consistent benchmarking
-    let mldsa_keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
-    let (_hybrid_enc_keypair, hybrid_sig_keypair) = KeyPair::generate_hybrid(&mut rng).unwrap();
+    let mldsa_keypair = KeyPair::generate_mldsa87().unwrap();
+    let (_hybrid_enc_keypair, hybrid_sig_keypair) = KeyPair::generate_hybrid().unwrap();
 
     let small_msg = vec![0u8; 64];
     let medium_msg = vec![0u8; 1024];
@@ -394,7 +380,7 @@ fn bench_batch_operations(c: &mut Criterion) {
     let mut rng = OsRng;
 
     // Pre-generate key pairs for batch operations
-    let (enc_keypair, sig_keypair) = KeyPair::generate_hybrid(&mut rng).unwrap();
+    let (enc_keypair, sig_keypair) = KeyPair::generate_hybrid().unwrap();
     let message = vec![0u8; 1024];
 
     // Batch encryption

@@ -33,7 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Step 1: Generate hybrid key pairs for Alice and Bob
     println!("📊 Step 1: Generating post-quantum key pairs...");
 
-    let (alice_enc_key, alice_sign_key) = KeyPair::generate_hybrid(&mut rng)?;
+    let (alice_enc_key, alice_sign_key) = KeyPair::generate_hybrid()?;
     println!("✅ Generated Alice's hybrid key pairs:");
     println!(
         "   Encryption key ({}): {:016X}",
@@ -46,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         alice_sign_key.key_id()
     );
 
-    let (bob_enc_key, bob_sign_key) = KeyPair::generate_hybrid(&mut rng)?;
+    let (bob_enc_key, bob_sign_key) = KeyPair::generate_hybrid()?;
     println!("✅ Generated Bob's hybrid key pairs:");
     println!(
         "   Encryption key ({}): {:016X}",

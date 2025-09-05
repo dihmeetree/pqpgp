@@ -209,7 +209,6 @@ async fn generate_key(
         warn!("CSRF validation failed for key generation");
         return Err(StatusCode::FORBIDDEN);
     }
-    let mut rng = OsRng;
     let mut keyring = match create_keyring_manager() {
         Ok(kr) => kr,
         Err(e) => {
@@ -262,8 +261,8 @@ async fn generate_key(
 
     // Generate key pair
     let mut keypair = match algorithm {
-        Algorithm::Mlkem1024 => KeyPair::generate_mlkem1024(&mut rng),
-        Algorithm::Mldsa87 => KeyPair::generate_mldsa87(&mut rng),
+        Algorithm::Mlkem1024 => KeyPair::generate_mlkem1024(),
+        Algorithm::Mldsa87 => KeyPair::generate_mldsa87(),
         _ => {
             error!("Unsupported algorithm for key generation: {:?}", algorithm);
             return Err(StatusCode::BAD_REQUEST);
@@ -888,28 +887,25 @@ async fn encrypt_message(
                     && entry.public_key.algorithm() == Algorithm::Mldsa87
             });
 
-            let _signing_entry = match signing_entry {
-                Some((_, entry, _)) => entry,
-                None => {
-                    error!(
-                        "Signing key not found or not available: {:016X}",
-                        signing_key_id
-                    );
-                    let csrf_token = get_csrf_token(&session, &csrf_store)
-                        .await
-                        .unwrap_or_default();
-                    let template = create_error_template(
-                        "Signing key not found. Please select a valid signing key.".to_string(),
-                        &all_entries,
-                        csrf_token,
-                    );
-                    return Ok(Html(
-                        template
-                            .render()
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
-                    ));
-                }
-            };
+            if signing_entry.is_none() {
+                error!(
+                    "Signing key not found or not available: {:016X}",
+                    signing_key_id
+                );
+                let csrf_token = get_csrf_token(&session, &csrf_store)
+                    .await
+                    .unwrap_or_default();
+                let template = create_error_template(
+                    "Signing key not found. Please select a valid signing key.".to_string(),
+                    &all_entries,
+                    csrf_token,
+                );
+                return Ok(Html(
+                    template
+                        .render()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                ));
+            }
 
             // Get private key for signing
             let private_key = match keyring.get_private_key(signing_key_id) {

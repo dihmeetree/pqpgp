@@ -27,7 +27,7 @@
 //! use rand::rngs::OsRng;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut rng = OsRng;
-//! let keypair = KeyPair::generate_mlkem1024(&mut rng)?;
+//! let keypair = KeyPair::generate_mlkem1024()?;
 //! println!("Generated post-quantum key pair with {} byte public key",
 //!          keypair.public_key().as_bytes().len());
 //! # Ok(())
@@ -41,7 +41,7 @@
 //! use rand::rngs::OsRng;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut rng = OsRng;
-//! let keypair = KeyPair::generate_mlkem1024(&mut rng)?;
+//! let keypair = KeyPair::generate_mlkem1024()?;
 //! let message = b"Secret post-quantum message";
 //! let encrypted = encrypt_message(keypair.public_key(), message, &mut rng)?;
 //! let decrypted = decrypt_message(keypair.private_key(), &encrypted, None)?;

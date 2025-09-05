@@ -168,11 +168,7 @@ fn derive_key_from_password(password: &Password, salt: &[u8; SALT_SIZE]) -> Resu
 }
 
 /// Verify a password against stored parameters (for testing/validation)
-pub fn verify_password(
-    password: &Password,
-    _salt: &[u8; SALT_SIZE],
-    expected_hash: &str,
-) -> Result<bool> {
+pub fn verify_password(password: &Password, expected_hash: &str) -> Result<bool> {
     let argon2 = Argon2::new(
         argon2::Algorithm::Argon2id,
         argon2::Version::V0x13,

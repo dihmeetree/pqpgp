@@ -18,8 +18,7 @@ fn test_end_to_end_encryption() {
     let mut rng = OsRng;
 
     // Generate Bob's key pair for encryption test
-    let bob_keypair =
-        KeyPair::generate_mlkem1024(&mut rng).expect("Failed to generate Bob's key pair");
+    let bob_keypair = KeyPair::generate_mlkem1024().expect("Failed to generate Bob's key pair");
 
     // Test message
     let original_message = b"This is a secret post-quantum message from Alice to Bob!";
@@ -38,11 +37,9 @@ fn test_end_to_end_encryption() {
 /// Test complete end-to-end signing and verification workflow
 #[test]
 fn test_end_to_end_signing() {
-    let mut rng = OsRng;
-
     // Generate signing key pair
     let alice_keypair =
-        KeyPair::generate_mldsa87(&mut rng).expect("Failed to generate Alice's signing key pair");
+        KeyPair::generate_mldsa87().expect("Failed to generate Alice's signing key pair");
 
     // Test message
     let message = b"This document is signed by Alice with post-quantum cryptography";
@@ -67,11 +64,11 @@ fn test_hybrid_cryptography_workflow() {
 
     // Generate hybrid key pairs for Alice
     let (_alice_kem_keypair, alice_dsa_keypair) =
-        KeyPair::generate_hybrid(&mut rng).expect("Failed to generate Alice's hybrid key pairs");
+        KeyPair::generate_hybrid().expect("Failed to generate Alice's hybrid key pairs");
 
     // Generate hybrid key pairs for Bob
     let (bob_kem_keypair, _bob_dsa_keypair) =
-        KeyPair::generate_hybrid(&mut rng).expect("Failed to generate Bob's hybrid key pairs");
+        KeyPair::generate_hybrid().expect("Failed to generate Bob's hybrid key pairs");
 
     let message = b"Secret message with authentication";
 
@@ -98,7 +95,7 @@ fn test_armor_integration() {
     let mut rng = OsRng;
 
     // Generate a key pair
-    let keypair = KeyPair::generate_mlkem1024(&mut rng).expect("Failed to generate key pair");
+    let keypair = KeyPair::generate_mlkem1024().expect("Failed to generate key pair");
 
     // Test message
     let message = b"Test message for armor integration";
@@ -137,16 +134,12 @@ fn test_keyring_management_workflow() {
     let temp_dir = TempDir::new().expect("Failed to create temp directory");
     let keyring_path = temp_dir.path();
 
-    let mut rng = OsRng;
-
     // Create keyring manager
     let mut keyring = KeyringManager::with_directory(keyring_path);
 
     // Generate key pairs
-    let alice_keypair =
-        KeyPair::generate_mlkem1024(&mut rng).expect("Failed to generate Alice's key pair");
-    let bob_keypair =
-        KeyPair::generate_mldsa87(&mut rng).expect("Failed to generate Bob's key pair");
+    let alice_keypair = KeyPair::generate_mlkem1024().expect("Failed to generate Alice's key pair");
+    let bob_keypair = KeyPair::generate_mldsa87().expect("Failed to generate Bob's key pair");
 
     // Add keys to keyring
     keyring
@@ -196,9 +189,9 @@ fn test_secure_communication_scenario() {
 
     // Setup: Alice and Bob generate hybrid key pairs
     let (alice_enc_keypair, alice_sign_keypair) =
-        KeyPair::generate_hybrid(&mut rng).expect("Failed to generate Alice's hybrid keys");
+        KeyPair::generate_hybrid().expect("Failed to generate Alice's hybrid keys");
     let (bob_enc_keypair, bob_sign_keypair) =
-        KeyPair::generate_hybrid(&mut rng).expect("Failed to generate Bob's hybrid keys");
+        KeyPair::generate_hybrid().expect("Failed to generate Bob's hybrid keys");
 
     // Both add their keys to keyrings
     let mut alice_keyring = KeyringManager::with_directory(keyring_path.join("alice"));
@@ -326,7 +319,7 @@ fn test_large_message_handling() {
     let mut rng = OsRng;
 
     // Generate key pair
-    let keypair = KeyPair::generate_mlkem1024(&mut rng).expect("Failed to generate key pair");
+    let keypair = KeyPair::generate_mlkem1024().expect("Failed to generate key pair");
 
     // Create a large message (1MB)
     let large_message: Vec<u8> = (0..1_000_000).map(|i| (i % 256) as u8).collect();
@@ -362,7 +355,7 @@ fn test_key_export_import_workflow() {
 
     // Create first keyring with a key
     let mut keyring1 = KeyringManager::with_directory(&keyring1_path);
-    let keypair = KeyPair::generate_mlkem1024(&mut rng).expect("Failed to generate key pair");
+    let keypair = KeyPair::generate_mlkem1024().expect("Failed to generate key pair");
 
     keyring1
         .add_keypair(&keypair, Some("Test User <test@example.com>".to_string()))

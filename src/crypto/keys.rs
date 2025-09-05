@@ -13,7 +13,6 @@ use pqcrypto_mlkem::mlkem1024::{
 };
 use pqcrypto_traits::kem::{PublicKey as KemPublicKey, SecretKey as KemSecretKey};
 use pqcrypto_traits::sign::{PublicKey as SignPublicKey, SecretKey as SignSecretKey};
-use rand::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -291,12 +290,9 @@ impl PrivateKey {
 impl KeyPair {
     /// Generates a new ML-KEM-1024 key pair for encryption/decryption
     ///
-    /// Note: The `rng` parameter is currently ignored as the pqcrypto-mlkem crate
-    /// uses its own internal cryptographically secure RNG for key generation.
-    /// This is acceptable as the internal RNG provides sufficient cryptographic security.
-    ///
-    /// Future versions may support custom RNG if the underlying library adds support.
-    pub fn generate_mlkem1024<R: CryptoRng + RngCore>(_rng: &mut R) -> Result<Self> {
+    /// Uses the pqcrypto-mlkem crate's internal cryptographically secure RNG
+    /// for key generation, which provides sufficient cryptographic security.
+    pub fn generate_mlkem1024() -> Result<Self> {
         let usage = KeyUsage::encrypt_only();
 
         // Note: mlkem1024::keypair() uses internal CSPRNG - this is cryptographically secure
@@ -318,12 +314,9 @@ impl KeyPair {
 
     /// Generates a new ML-DSA-87 key pair for signing/verification
     ///
-    /// Note: The `rng` parameter is currently ignored as the pqcrypto-mldsa crate
-    /// uses its own internal cryptographically secure RNG for key generation.
-    /// This is acceptable as the internal RNG provides sufficient cryptographic security.
-    ///
-    /// Future versions may support custom RNG if the underlying library adds support.
-    pub fn generate_mldsa87<R: CryptoRng + RngCore>(_rng: &mut R) -> Result<Self> {
+    /// Uses the pqcrypto-mldsa crate's internal cryptographically secure RNG
+    /// for key generation, which provides sufficient cryptographic security.
+    pub fn generate_mldsa87() -> Result<Self> {
         let usage = KeyUsage::sign_only();
 
         // Note: mldsa87::keypair() uses internal CSPRNG - this is cryptographically secure
@@ -345,9 +338,9 @@ impl KeyPair {
 
     /// Generates a complete key set with both encryption and signing capabilities
     /// Returns (encryption_keypair, signing_keypair)
-    pub fn generate_hybrid<R: CryptoRng + RngCore>(rng: &mut R) -> Result<(Self, Self)> {
-        let kem_keypair = Self::generate_mlkem1024(rng)?;
-        let dsa_keypair = Self::generate_mldsa87(rng)?;
+    pub fn generate_hybrid() -> Result<(Self, Self)> {
+        let kem_keypair = Self::generate_mlkem1024()?;
+        let dsa_keypair = Self::generate_mldsa87()?;
         Ok((kem_keypair, dsa_keypair))
     }
 
@@ -419,12 +412,10 @@ impl fmt::Display for KeyPair {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
 
     #[test]
     fn test_mlkem1024_key_generation() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         assert!(keypair.is_valid());
         assert_eq!(keypair.algorithm(), Algorithm::Mlkem1024);
@@ -434,8 +425,7 @@ mod tests {
 
     #[test]
     fn test_mldsa87_key_generation() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         assert!(keypair.is_valid());
         assert_eq!(keypair.algorithm(), Algorithm::Mldsa87);
@@ -445,8 +435,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_key_generation() {
-        let mut rng = OsRng;
-        let (kem_keypair, dsa_keypair) = KeyPair::generate_hybrid(&mut rng).unwrap();
+        let (kem_keypair, dsa_keypair) = KeyPair::generate_hybrid().unwrap();
 
         assert!(kem_keypair.is_valid());
         assert!(dsa_keypair.is_valid());
@@ -457,9 +446,8 @@ mod tests {
 
     #[test]
     fn test_key_fingerprints() {
-        let mut rng = OsRng;
-        let keypair1 = KeyPair::generate_mlkem1024(&mut rng).unwrap();
-        let keypair2 = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair1 = KeyPair::generate_mlkem1024().unwrap();
+        let keypair2 = KeyPair::generate_mlkem1024().unwrap();
 
         let fp1 = keypair1.public_key().fingerprint();
         let fp2 = keypair2.public_key().fingerprint();
@@ -471,8 +459,7 @@ mod tests {
 
     #[test]
     fn test_key_serialization() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mldsa87(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mldsa87().unwrap();
 
         let bytes = keypair.public_key().as_bytes();
         assert!(!bytes.is_empty());

@@ -17,15 +17,14 @@ use tracing::{error, info};
 
 /// Execute generate-key command
 pub fn generate_key(algorithm: Algorithm, user_id: &str, password_protected: bool) -> Result<()> {
-    let mut rng = OsRng;
     let mut keyring = create_keyring_manager()?;
 
     info!(algorithm = %algorithm, user_id = user_id, "Generating key pair");
 
     // Generate key pair based on algorithm
     let mut keypair = match algorithm {
-        Algorithm::Mlkem1024 => KeyPair::generate_mlkem1024(&mut rng)?,
-        Algorithm::Mldsa87 => KeyPair::generate_mldsa87(&mut rng)?,
+        Algorithm::Mlkem1024 => KeyPair::generate_mlkem1024()?,
+        Algorithm::Mldsa87 => KeyPair::generate_mldsa87()?,
         _ => {
             return Err(crate::error::PqpgpError::crypto(format!(
                 "Unsupported algorithm for key generation: {}",

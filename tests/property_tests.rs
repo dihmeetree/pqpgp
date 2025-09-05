@@ -14,7 +14,7 @@ use rand::{rngs::OsRng, Rng};
 #[test]
 fn property_encryption_decryption_roundtrip() {
     let mut rng = OsRng;
-    let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+    let keypair = KeyPair::generate_mlkem1024().unwrap();
 
     // Test with various message sizes and contents
     for _ in 0..50 {

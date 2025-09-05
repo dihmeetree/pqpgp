@@ -432,7 +432,6 @@ impl UserIdPacket {
 mod tests {
     use super::*;
     use crate::crypto::KeyPair;
-    use rand::rngs::OsRng;
 
     #[test]
     fn test_packet_type_conversion() {
@@ -465,8 +464,7 @@ mod tests {
 
     #[test]
     fn test_public_key_packet() {
-        let mut rng = OsRng;
-        let keypair = KeyPair::generate_mlkem1024(&mut rng).unwrap();
+        let keypair = KeyPair::generate_mlkem1024().unwrap();
 
         let pk_packet = PublicKeyPacket::from_public_key(keypair.public_key());
         let bytes = pk_packet.to_bytes();
@@ -492,10 +490,7 @@ mod tests {
         // Test different length encodings
         let test_cases = vec![
             (50, vec![0xC0 | PacketType::PublicKey.to_byte(), 50]),
-            (
-                200,
-                vec![0xC0 | PacketType::PublicKey.to_byte(), 192 + 0, 8],
-            ), // 200 = 192 + 8
+            (200, vec![0xC0 | PacketType::PublicKey.to_byte(), 192, 8]), // 200 = 192 + 8
             (
                 10000,
                 vec![0xC0 | PacketType::PublicKey.to_byte(), 255, 0, 0, 39, 16],
