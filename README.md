@@ -39,10 +39,8 @@ cargo build --release
 ```rust
 use pqpgp::crypto::{KeyPair, encrypt_message, decrypt_message, sign_message, verify_signature, Password};
 use pqpgp::armor::{create_signed_message, parse_signed_message};
-use rand::rngs::OsRng;
 
 // Generate hybrid key pairs (encryption + signing)
-let mut rng = OsRng;
 let (enc_keypair, sign_keypair) = KeyPair::generate_hybrid()?
 
 // Optionally protect private keys with password
