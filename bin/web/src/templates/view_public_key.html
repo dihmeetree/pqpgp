@@ -5,7 +5,11 @@
 {% block content %}
 <div class="card">
     <h2>🔑 Public Key Details</h2>
-    <p>This is the public key that others can use to encrypt messages for you or verify your signatures. Share this key safely with anyone who needs to communicate securely with you.</p>
+    {% if algorithm == "ML-KEM-1024" %}
+    <p>This is your <strong>encryption public key</strong> that others use to encrypt messages only you can decrypt. Share this key safely with anyone who needs to send you secure messages.</p>
+    {% else %}
+    <p>This is your <strong>signature verification key</strong> that others use to verify your digital signatures. Share this key with anyone who needs to authenticate messages you've signed.</p>
+    {% endif %}
     
     <div class="form-group">
         <label><strong>Key ID:</strong></label>
@@ -38,7 +42,11 @@
         <label><strong>Public Key (PGP Armored Format):</strong></label>
         <div class="code-block">{{ public_key_armored }}</div>
         <small style="color: #718096; display: block; margin-top: 10px;">
-            💡 Copy this entire block to share your public key. Others can import this to encrypt messages for you{% if algorithm == "ML-DSA-87" %} or verify your signatures{% endif %}.
+            {% if algorithm == "ML-KEM-1024" %}
+            💡 Copy this entire block to share your encryption key. Others can import this to encrypt messages for you.
+            {% else %}
+            💡 Copy this entire block to share your verification key. Others can import this to verify your signatures.
+            {% endif %}
         </small>
     </div>
     
@@ -51,23 +59,43 @@
 </div>
 
 <div class="card">
-    <h2>💡 How to Share Your Public Key</h2>
+    {% if algorithm == "ML-KEM-1024" %}
+    <h2>💡 How to Share Your Encryption Key</h2>
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
         <div style="padding: 15px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #48bb78;">
             <h4 style="margin-top: 0; color: #4a5568;">1. Copy & Share</h4>
-            <p>Copy the armored public key text above and share it via email, messaging, or upload to a key server.</p>
+            <p>Copy the armored encryption key above and share it with anyone who needs to send you encrypted messages.</p>
         </div>
         
         <div style="padding: 15px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #667eea;">
             <h4 style="margin-top: 0; color: #4a5568;">2. Download File</h4>
-            <p>Use the download button to save your public key as a .asc file that others can import.</p>
+            <p>Save your encryption key as a .asc file that others can import into their PQPGP systems.</p>
         </div>
         
         <div style="padding: 15px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #ed8936;">
             <h4 style="margin-top: 0; color: #4a5568;">3. Keep Private Key Safe</h4>
-            <p>Never share your private key! Only share this public key portion with others.</p>
+            <p>Never share your private key! Only you should have access to decrypt messages.</p>
         </div>
     </div>
+    {% else %}
+    <h2>💡 How to Share Your Verification Key</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px;">
+        <div style="padding: 15px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #48bb78;">
+            <h4 style="margin-top: 0; color: #4a5568;">1. Copy & Share</h4>
+            <p>Copy the armored verification key above and share it with anyone who needs to verify your signatures.</p>
+        </div>
+        
+        <div style="padding: 15px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #667eea;">
+            <h4 style="margin-top: 0; color: #4a5568;">2. Download File</h4>
+            <p>Save your verification key as a .asc file that others can import to authenticate your signatures.</p>
+        </div>
+        
+        <div style="padding: 15px; background: #f7fafc; border-radius: 8px; border-left: 4px solid #ed8936;">
+            <h4 style="margin-top: 0; color: #4a5568;">3. Keep Private Key Safe</h4>
+            <p>Never share your private key! Only you should be able to create signatures.</p>
+        </div>
+    </div>
+    {% endif %}
     
     <div style="margin-top: 20px; padding: 15px; background-color: #fffbf0; border: 1px solid #fbd38d; border-radius: 8px;">
         <h4 style="margin-top: 0; color: #744210;">🔐 Security Properties</h4>
