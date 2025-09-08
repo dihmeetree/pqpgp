@@ -4,7 +4,7 @@ use askama::Template;
 use axum::{
     extract::{Form, Multipart, Path as AxumPath, State},
     http::StatusCode,
-    response::{Html, Redirect},
+    response::{Html, IntoResponse, Redirect},
     routing::{get, post},
     Router,
 };
@@ -25,8 +25,8 @@ use tracing_subscriber::EnvFilter;
 
 mod csrf;
 mod templates;
-use csrf::{get_csrf_token, CsrfProtectedForm, CsrfStore};
-use templates::{SigningKeyInfo, *};
+use csrf::{get_csrf_token, validate_csrf_token, CsrfProtectedForm, CsrfStore};
+use templates::{FilesTemplate, SigningKeyInfo, *};
 
 /// Form data for key generation
 #[derive(Debug, Deserialize)]
@@ -103,6 +103,10 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .route("/decrypt", get(decrypt_page).post(decrypt_handler))
         .route("/sign", get(sign_page).post(sign_handler))
         .route("/verify", get(verify_page).post(verify_handler))
+        .route("/files", get(files_page))
+        .route("/files/encrypt", post(encrypt_file_handler))
+        .route("/files/decrypt", post(decrypt_file_handler))
+        .route("/files/download", get(download_decrypted_file))
         .nest_service("/static", ServeDir::new("src/web/static"))
         .layer(session_layer)
         .with_state(csrf_store);
@@ -1825,4 +1829,881 @@ async fn verify_handler(
         error!("Template rendering failed: {:?}", e);
         StatusCode::INTERNAL_SERVER_ERROR
     })?))
+}
+
+/// Files page
+async fn files_page(
+    State(csrf_store): State<CsrfStore>,
+    session: Session,
+) -> std::result::Result<Html<String>, StatusCode> {
+    let keyring = match create_keyring_manager() {
+        Ok(kr) => kr,
+        Err(e) => {
+            error!("Failed to create keyring manager for files page: {:?}", e);
+            let csrf_token = get_csrf_token(&session, &csrf_store)
+                .await
+                .unwrap_or_default();
+            let template = FilesTemplate {
+                recipients: vec![],
+                signing_keys: vec![],
+                result: None,
+                error: Some("Failed to access key storage".to_string()),
+                has_result: false,
+                has_error: true,
+                signature_found: false,
+                signature_armored: None,
+                signer_info: None,
+                signature_verified: None,
+                verification_message: None,
+                active_page: "files".to_string(),
+                csrf_token,
+            };
+            return Ok(Html(template.render().map_err(|e| {
+                error!("Failed to render files template with error: {:?}", e);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?));
+        }
+    };
+
+    let entries = keyring.list_all_keys();
+
+    let recipients: Vec<RecipientInfo> = entries
+        .iter()
+        .filter(|(_, entry, _)| entry.public_key.algorithm() == Algorithm::Mlkem1024)
+        .map(|(key_id, entry, _)| RecipientInfo {
+            key_id: format!("{:016X}", key_id),
+            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        })
+        .collect();
+
+    let signing_keys: Vec<SigningKeyInfo> = entries
+        .into_iter()
+        .filter(|(_, entry, has_private)| {
+            *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
+        })
+        .map(|(key_id, entry, _)| SigningKeyInfo {
+            key_id: format!("{:016X}", key_id),
+            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        })
+        .collect();
+
+    info!(
+        "Files page loaded with {} recipients and {} signing keys",
+        recipients.len(),
+        signing_keys.len()
+    );
+
+    let csrf_token = get_csrf_token(&session, &csrf_store).await.map_err(|_| {
+        error!("Failed to generate CSRF token");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let template = FilesTemplate {
+        recipients,
+        signing_keys,
+        result: None,
+        error: None,
+        has_result: false,
+        has_error: false,
+        signature_found: false,
+        signature_armored: None,
+        signer_info: None,
+        signature_verified: None,
+        verification_message: None,
+        active_page: "files".to_string(),
+        csrf_token,
+    };
+    Ok(Html(template.render().map_err(|e| {
+        error!("Failed to render files template: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?))
+}
+
+/// Encrypt a file
+#[instrument(skip(multipart), fields(operation = "file_encrypt"))]
+async fn encrypt_file_handler(
+    State(csrf_store): State<CsrfStore>,
+    session: Session,
+    mut multipart: Multipart,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    let keyring = match create_keyring_manager() {
+        Ok(kr) => kr,
+        Err(e) => {
+            error!("Failed to create keyring manager: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Parse multipart form
+    let mut csrf_token_value = String::new();
+    let mut recipient = String::new();
+    let mut signing_key = String::new();
+    let mut password = String::new();
+    let mut file_data = Vec::new();
+    let mut filename = String::new();
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        error!("Failed to read multipart field: {:?}", e);
+        StatusCode::BAD_REQUEST
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
+
+        match field_name.as_str() {
+            "csrf_token" => {
+                csrf_token_value = field.text().await.map_err(|e| {
+                    error!("Failed to read CSRF token: {:?}", e);
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            "recipient" => {
+                recipient = field.text().await.map_err(|e| {
+                    error!("Failed to read recipient: {:?}", e);
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            "signing_key" => {
+                signing_key = field.text().await.map_err(|e| {
+                    error!("Failed to read signing key: {:?}", e);
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            "password" => {
+                password = field.text().await.map_err(|e| {
+                    error!("Failed to read password: {:?}", e);
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            "file" => {
+                filename = field.file_name().unwrap_or("unknown_file").to_string();
+                file_data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        error!("Failed to read file data: {:?}", e);
+                        StatusCode::BAD_REQUEST
+                    })?
+                    .to_vec();
+            }
+            _ => {
+                continue;
+            }
+        }
+    }
+
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &csrf_store, &csrf_token_value) {
+        warn!("CSRF validation failed for file encryption");
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if file_data.is_empty() {
+        error!("No file provided for encryption");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    info!(
+        "Encrypting file '{}' ({} bytes) for recipient '{}'",
+        filename,
+        file_data.len(),
+        recipient
+    );
+
+    // Find recipient's public key
+    let all_entries = keyring.list_all_keys();
+    let matching_entries: Vec<_> = all_entries
+        .iter()
+        .filter(|(_, entry, _)| {
+            entry.public_key.algorithm() == Algorithm::Mlkem1024
+                && entry.user_ids.iter().any(|uid| uid.contains(&recipient))
+        })
+        .collect();
+
+    if matching_entries.is_empty() {
+        error!("No encryption key found for recipient '{}'", recipient);
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let recipient_key = &matching_entries[0].1.public_key;
+
+    // Prepare file data for encryption (sign first if requested)
+    let data_to_encrypt = if !signing_key.is_empty() {
+        // Parse signing key ID
+        let signing_key_id = match u64::from_str_radix(&signing_key, 16) {
+            Ok(id) => id,
+            Err(_) => {
+                error!("Invalid signing key ID format");
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        };
+
+        // Get private key for signing
+        let private_key = match keyring.get_private_key(signing_key_id) {
+            Some(pk) => pk,
+            None => {
+                error!("Private signing key not found");
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        };
+
+        // Prepare password for signing
+        let signing_password = if !password.is_empty() {
+            Some(Password::new(password))
+        } else {
+            None
+        };
+
+        // Sign the file data
+        let signature = match sign_message(private_key, &file_data, signing_password.as_ref()) {
+            Ok(sig) => sig,
+            Err(e) => {
+                error!("Failed to sign file: {:?}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+        // Serialize signature
+        let signature_data = match bincode::serialize(&signature) {
+            Ok(data) => data,
+            Err(e) => {
+                error!("Failed to serialize signature: {:?}", e);
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+        };
+
+        // Combine filename, file data, and signature
+        let mut combined_data = Vec::new();
+        combined_data.extend_from_slice(&(filename.len() as u32).to_le_bytes());
+        combined_data.extend_from_slice(filename.as_bytes());
+        combined_data.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        combined_data.extend_from_slice(&file_data);
+        combined_data.extend_from_slice(&(signature_data.len() as u32).to_le_bytes());
+        combined_data.extend_from_slice(&signature_data);
+        combined_data
+    } else {
+        // No signing, just combine filename and file data
+        let mut combined_data = Vec::new();
+        combined_data.extend_from_slice(&(filename.len() as u32).to_le_bytes());
+        combined_data.extend_from_slice(filename.as_bytes());
+        combined_data.extend_from_slice(&(file_data.len() as u64).to_le_bytes());
+        combined_data.extend_from_slice(&file_data);
+        combined_data
+    };
+
+    // Encrypt the file
+    let encrypted = match encrypt_message(recipient_key, &data_to_encrypt) {
+        Ok(enc) => enc,
+        Err(e) => {
+            error!("File encryption failed: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    // Serialize encrypted data
+    let serialized = match bincode::serialize(&encrypted) {
+        Ok(ser) => ser,
+        Err(e) => {
+            error!("Failed to serialize encrypted file: {:?}", e);
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
+
+    info!("File '{}' encrypted successfully", filename);
+
+    // Create encrypted filename
+    let encrypted_filename = format!("{}.pqpgp", filename);
+
+    // Return as downloadable file
+    use axum::http::header;
+    let response = axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", encrypted_filename),
+        )
+        .body(axum::body::Body::from(serialized))
+        .map_err(|e| {
+            error!("Failed to create response for file download: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(response)
+}
+
+/// Decrypt a file
+#[instrument(skip(multipart), fields(operation = "file_decrypt"))]
+async fn decrypt_file_handler(
+    State(csrf_store): State<CsrfStore>,
+    session: Session,
+    mut multipart: Multipart,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    // Helper function to create error template
+    let create_error_template = |error_msg: String, csrf_token: String| -> Result<Html<String>, StatusCode> {
+        let keyring = match create_keyring_manager() {
+            Ok(kr) => kr,
+            Err(_) => {
+                let template = FilesTemplate {
+                    recipients: vec![],
+                    signing_keys: vec![],
+                    result: None,
+                    error: Some("Failed to access key storage".to_string()),
+                    has_result: false,
+                    has_error: true,
+                    signature_found: false,
+                    signature_armored: None,
+                    signer_info: None,
+                    signature_verified: None,
+                    verification_message: None,
+                    active_page: "files".to_string(),
+                    csrf_token,
+                };
+                return Ok(Html(
+                    template
+                        .render()
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+                ));
+            }
+        };
+
+        let entries = keyring.list_all_keys();
+        let recipients: Vec<RecipientInfo> = entries
+            .iter()
+            .filter(|(_, entry, _)| entry.public_key.algorithm() == Algorithm::Mlkem1024)
+            .map(|(key_id, entry, _)| RecipientInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+            })
+            .collect();
+
+        let signing_keys: Vec<SigningKeyInfo> = entries
+            .iter()
+            .filter(|(_, entry, has_private)| {
+                *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
+            })
+            .map(|(key_id, entry, _)| SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+            })
+            .collect();
+
+        let template = FilesTemplate {
+            recipients,
+            signing_keys,
+            result: None,
+            error: Some(error_msg),
+            has_result: false,
+            has_error: true,
+            signature_found: false,
+            signature_armored: None,
+            signer_info: None,
+            signature_verified: None,
+            verification_message: None,
+            active_page: "files".to_string(),
+            csrf_token,
+        };
+
+        Ok(Html(
+            template
+                .render()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+        ))
+    };
+
+    let keyring = match create_keyring_manager() {
+        Ok(kr) => kr,
+        Err(e) => {
+            error!("Failed to create keyring manager: {:?}", e);
+            let csrf_token = get_csrf_token(&session, &csrf_store)
+                .await
+                .unwrap_or_default();
+            let html = create_error_template(
+                "Failed to access key storage. Please check your keyring configuration.".to_string(),
+                csrf_token,
+            )?;
+            return Ok(html.into_response());
+        }
+    };
+
+    // Parse multipart form
+    let mut csrf_token_value = String::new();
+    let mut password = String::new();
+    let mut file_data = Vec::new();
+    let mut filename = String::new();
+
+    while let Some(field) = multipart.next_field().await.map_err(|e| {
+        error!("Failed to read multipart field: {:?}", e);
+        StatusCode::BAD_REQUEST
+    })? {
+        let field_name = field.name().unwrap_or("").to_string();
+
+        match field_name.as_str() {
+            "csrf_token" => {
+                csrf_token_value = field.text().await.map_err(|e| {
+                    error!("Failed to read CSRF token: {:?}", e);
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            "password" => {
+                password = field.text().await.map_err(|e| {
+                    error!("Failed to read password: {:?}", e);
+                    StatusCode::BAD_REQUEST
+                })?;
+            }
+            "file" => {
+                filename = field.file_name().unwrap_or("unknown_file").to_string();
+                file_data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| {
+                        error!("Failed to read file data: {:?}", e);
+                        StatusCode::BAD_REQUEST
+                    })?
+                    .to_vec();
+            }
+            _ => {
+                continue;
+            }
+        }
+    }
+
+    // Validate CSRF token
+    if !validate_csrf_token(&session, &csrf_store, &csrf_token_value) {
+        warn!("CSRF validation failed for file decryption");
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let csrf_token = get_csrf_token(&session, &csrf_store).await.unwrap_or_default();
+
+    if file_data.is_empty() {
+        error!("No file provided for decryption");
+        let html = create_error_template(
+            "No file provided. Please select an encrypted file to decrypt.".to_string(),
+            csrf_token,
+        )?;
+        return Ok(html.into_response());
+    }
+
+    info!("Decrypting file '{}' ({} bytes)", filename, file_data.len());
+
+    // Deserialize encrypted message
+    let encrypted_message: pqpgp::crypto::EncryptedMessage = match bincode::deserialize(&file_data)
+    {
+        Ok(msg) => msg,
+        Err(e) => {
+            error!("Failed to deserialize encrypted file: {:?}", e);
+            let html = create_error_template(
+                "Invalid encrypted file format. Please ensure you're uploading a valid .pqpgp encrypted file.".to_string(),
+                csrf_token.clone(),
+            )?;
+            return Ok(html.into_response());
+        }
+    };
+
+    // Convert password if provided
+    let decryption_password = if !password.is_empty() {
+        Some(Password::new(password))
+    } else {
+        None
+    };
+
+    // Find matching private key and decrypt
+    let all_entries = keyring.list_all_keys();
+    let entries_with_private: Vec<_> = all_entries
+        .iter()
+        .filter_map(|(key_id, _entry, has_private)| {
+            if *has_private {
+                keyring
+                    .get_private_key(*key_id)
+                    .map(|private_key| (*key_id, private_key))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if entries_with_private.is_empty() {
+        error!("No private keys available for decryption");
+        let html = create_error_template(
+            "No private keys found in your keyring. You need to generate or import private keys before you can decrypt files.".to_string(),
+            csrf_token.clone(),
+        )?;
+        return Ok(html.into_response());
+    }
+
+    let mut decrypted_data = None;
+
+    // Try decryption with available keys
+    for (key_id, private_key) in entries_with_private.iter() {
+        if *key_id == encrypted_message.recipient_key_id() {
+            info!("Trying exact match key ID: {:016X}", key_id);
+            match decrypt_message(
+                private_key,
+                &encrypted_message,
+                decryption_password.as_ref(),
+            ) {
+                Ok(data) => {
+                    info!("Successfully decrypted file with key ID: {:016X}", key_id);
+                    decrypted_data = Some(data);
+                    break;
+                }
+                Err(e) => {
+                    warn!(
+                        "Decryption failed with exact match key {:016X}: {:?}",
+                        key_id, e
+                    );
+                }
+            }
+        }
+    }
+
+    // If exact match failed, try all other keys
+    if decrypted_data.is_none() {
+        for (key_id, private_key) in entries_with_private {
+            if key_id != encrypted_message.recipient_key_id() {
+                info!("Trying key ID: {:016X}", key_id);
+                match decrypt_message(
+                    private_key,
+                    &encrypted_message,
+                    decryption_password.as_ref(),
+                ) {
+                    Ok(data) => {
+                        info!("Successfully decrypted file with key ID: {:016X}", key_id);
+                        decrypted_data = Some(data);
+                        break;
+                    }
+                    Err(e) => {
+                        warn!("Decryption failed with key {:016X}: {:?}", key_id, e);
+                    }
+                }
+            }
+        }
+    }
+
+    let decrypted_data = match decrypted_data {
+        Some(data) => data,
+        None => {
+            error!("Decryption failed with all available keys");
+            let html = create_error_template(
+                "Decryption failed. This could be due to: 1) Wrong password for private key, 2) File not encrypted for your keys, 3) Corrupted encrypted file. Please check your password and ensure you have the correct private key.".to_string(),
+                csrf_token.clone(),
+            )?;
+            return Ok(html.into_response());
+        }
+    };
+
+    // Parse decrypted data to extract filename and file content
+    let mut offset = 0;
+
+    // Read filename length
+    if decrypted_data.len() < offset + 4 {
+        error!("Corrupted encrypted file data");
+        let html = create_error_template(
+            "The decrypted file data appears to be corrupted or in an unexpected format.".to_string(),
+            csrf_token.clone(),
+        )?;
+        return Ok(html.into_response());
+    }
+    let filename_len = u32::from_le_bytes([
+        decrypted_data[offset],
+        decrypted_data[offset + 1],
+        decrypted_data[offset + 2],
+        decrypted_data[offset + 3],
+    ]) as usize;
+    offset += 4;
+
+    // Read filename
+    if decrypted_data.len() < offset + filename_len {
+        error!("Corrupted encrypted file data");
+        let html = create_error_template(
+            "The decrypted file data appears to be corrupted or in an unexpected format.".to_string(),
+            csrf_token.clone(),
+        )?;
+        return Ok(html.into_response());
+    }
+    let original_filename =
+        String::from_utf8_lossy(&decrypted_data[offset..offset + filename_len]).to_string();
+    offset += filename_len;
+
+    // Read file data length
+    if decrypted_data.len() < offset + 8 {
+        error!("Corrupted encrypted file data");
+        let html = create_error_template(
+            "The decrypted file data appears to be corrupted or in an unexpected format.".to_string(),
+            csrf_token.clone(),
+        )?;
+        return Ok(html.into_response());
+    }
+    let file_data_len = u64::from_le_bytes([
+        decrypted_data[offset],
+        decrypted_data[offset + 1],
+        decrypted_data[offset + 2],
+        decrypted_data[offset + 3],
+        decrypted_data[offset + 4],
+        decrypted_data[offset + 5],
+        decrypted_data[offset + 6],
+        decrypted_data[offset + 7],
+    ]) as usize;
+    offset += 8;
+
+    // Read file data
+    if decrypted_data.len() < offset + file_data_len {
+        error!("Corrupted encrypted file data");
+        let html = create_error_template(
+            "The decrypted file data appears to be corrupted or in an unexpected format.".to_string(),
+            csrf_token.clone(),
+        )?;
+        return Ok(html.into_response());
+    }
+    let original_file_data = &decrypted_data[offset..offset + file_data_len];
+    offset += file_data_len;
+
+    info!("File '{}' decrypted successfully", original_filename);
+
+    // Check if there's a signature after the file data
+    let mut signature_armored = None;
+    let mut signer_info = None;
+    let signature_found = if offset < decrypted_data.len() {
+        // Check if there are at least 4 more bytes for signature length
+        if decrypted_data.len() >= offset + 4 {
+            let signature_len = u32::from_le_bytes([
+                decrypted_data[offset],
+                decrypted_data[offset + 1],
+                decrypted_data[offset + 2],
+                decrypted_data[offset + 3],
+            ]) as usize;
+            offset += 4;
+
+            if decrypted_data.len() >= offset + signature_len {
+                let signature_data = &decrypted_data[offset..offset + signature_len];
+
+                // Deserialize the signature
+                match bincode::deserialize::<pqpgp::crypto::Signature>(signature_data) {
+                    Ok(signature) => {
+                        info!("Found signature from key ID: {:016X}", signature.key_id);
+
+                        // Find signer information
+                        let all_entries = keyring.list_all_keys();
+                        let signer = all_entries
+                            .iter()
+                            .find(|(key_id, _entry, _has_private)| *key_id == signature.key_id)
+                            .map(|(_, entry, _)| {
+                                let user_id = entry.user_ids.first().cloned().unwrap_or_default();
+                                format!("{} (Key ID: {:016X})", user_id, signature.key_id)
+                            })
+                            .unwrap_or_else(|| {
+                                format!("Unknown signer (Key ID: {:016X})", signature.key_id)
+                            });
+
+                        signer_info = Some(signer);
+
+                        // Armor the signature for display
+                        match pqpgp::armor::encode(
+                            signature_data,
+                            pqpgp::armor::ArmorType::Signature,
+                        ) {
+                            Ok(armored) => {
+                                signature_armored = Some(armored.trim().to_string());
+                                true
+                            }
+                            Err(e) => {
+                                warn!("Failed to armor signature: {:?}", e);
+                                false
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to deserialize signature: {:?}", e);
+                        false
+                    }
+                }
+            } else {
+                warn!("Signature length exceeds remaining data");
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Load keyring entries for template
+    let entries = keyring.list_all_keys();
+    let recipients: Vec<RecipientInfo> = entries
+        .iter()
+        .filter(|(_, entry, _)| entry.public_key.algorithm() == Algorithm::Mlkem1024)
+        .map(|(key_id, entry, _)| RecipientInfo {
+            key_id: format!("{:016X}", key_id),
+            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        })
+        .collect();
+
+    let signing_keys: Vec<SigningKeyInfo> = entries
+        .iter()
+        .filter(|(_, entry, has_private)| {
+            *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
+        })
+        .map(|(key_id, entry, _)| SigningKeyInfo {
+            key_id: format!("{:016X}", key_id),
+            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        })
+        .collect();
+
+    let result_message = if signature_found {
+        format!(
+            "✅ File '{}' decrypted successfully and signature found! You can download the file and verify the signature below.",
+            original_filename
+        )
+    } else {
+        format!(
+            "✅ File '{}' decrypted successfully (no signature found).",
+            original_filename
+        )
+    };
+
+    // Store decrypted file data in session for download
+    session
+        .insert("decrypted_file_data", original_file_data.to_vec())
+        .await
+        .map_err(|e| {
+            error!("Failed to store file data in session: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    session
+        .insert("decrypted_filename", original_filename)
+        .await
+        .map_err(|e| {
+            error!("Failed to store filename in session: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Perform automatic signature verification if signature was found
+    let (signature_verified, verification_message) = if signature_found {
+        // We need to get the signature from the stored armored signature
+        // and verify it against the original file data
+        match &signature_armored {
+            Some(armored_sig) => {
+                // Decode the armored signature back to binary
+                match pqpgp::armor::decode(armored_sig) {
+                    Ok(armored_data) => {
+                        // Deserialize the signature
+                        match bincode::deserialize::<pqpgp::crypto::Signature>(&armored_data.data) {
+                            Ok(signature) => {
+                                // Find the public key for verification
+                                let all_entries = keyring.list_all_keys();
+                                let signer_entry = all_entries
+                                    .iter()
+                                    .find(|(key_id, _, _)| *key_id == signature.key_id);
+                                
+                                match signer_entry {
+                                    Some((_, entry, _)) => {
+                                        // Verify the signature against the original file data
+                                        match pqpgp::crypto::verify_signature(&entry.public_key, original_file_data, &signature) {
+                                            Ok(()) => {
+                                                info!("File signature verification successful");
+                                                let user_id = entry.user_ids.first().cloned().unwrap_or_default();
+                                                (Some(true), Some(format!("✅ Signature is VALID and authentic (signed by {} with Key ID: {:016X})", user_id, signature.key_id)))
+                                            }
+                                            Err(e) => {
+                                                warn!("File signature verification failed: {:?}", e);
+                                                (Some(false), Some(format!("❌ Signature is INVALID or corrupted (Key ID: {:016X})", signature.key_id)))
+                                            }
+                                        }
+                                    }
+                                    None => {
+                                        warn!("Signer's public key not found for verification");
+                                        (Some(false), Some(format!("⚠️ Cannot verify: Signer's public key not found in keyring (Key ID: {:016X})", signature.key_id)))
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!("Failed to deserialize signature for verification: {:?}", e);
+                                (Some(false), Some("❌ Invalid signature format".to_string()))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to decode armored signature: {:?}", e);
+                        (Some(false), Some("❌ Invalid signature armor".to_string()))
+                    }
+                }
+            }
+            None => (None, None)
+        }
+    } else {
+        (None, None)
+    };
+
+    let template = FilesTemplate {
+        recipients,
+        signing_keys,
+        result: Some(result_message),
+        error: None,
+        has_result: true,
+        has_error: false,
+        signature_found,
+        signature_armored,
+        signer_info,
+        signature_verified,
+        verification_message,
+        active_page: "files".to_string(),
+        csrf_token,
+    };
+
+    Ok(Html(template.render().map_err(|e| {
+        error!("Failed to render files template: {:?}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?)
+    .into_response())
+}
+
+/// Download decrypted file from session
+async fn download_decrypted_file(
+    session: Session,
+) -> std::result::Result<axum::response::Response, StatusCode> {
+    // Get file data from session
+    let file_data: Vec<u8> = session
+        .get("decrypted_file_data")
+        .await
+        .map_err(|e| {
+            error!("Failed to retrieve file data from session: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!("No decrypted file data found in session");
+            StatusCode::NOT_FOUND
+        })?;
+
+    let filename: String = session
+        .get("decrypted_filename")
+        .await
+        .map_err(|e| {
+            error!("Failed to retrieve filename from session: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or_else(|| {
+            error!("No decrypted filename found in session");
+            StatusCode::NOT_FOUND
+        })?;
+
+    info!("Serving decrypted file '{}' for download", filename);
+
+    // Clean up session data after retrieving
+    let _ = session.remove::<Vec<u8>>("decrypted_file_data").await;
+    let _ = session.remove::<String>("decrypted_filename").await;
+
+    // Return as downloadable file
+    use axum::http::header;
+    let response = axum::response::Response::builder()
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(axum::body::Body::from(file_data))
+        .map_err(|e| {
+            error!("Failed to create response for file download: {:?}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    Ok(response)
 }

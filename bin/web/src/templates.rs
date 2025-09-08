@@ -107,3 +107,22 @@ pub struct ViewPublicKeyTemplate {
     pub public_key_armored: String,
     pub active_page: String,
 }
+
+/// File encryption/decryption template
+#[derive(Template)]
+#[template(path = "files.html")]
+pub struct FilesTemplate {
+    pub recipients: Vec<RecipientInfo>,
+    pub signing_keys: Vec<SigningKeyInfo>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub has_result: bool,
+    pub has_error: bool,
+    pub signature_found: bool,
+    pub signature_armored: Option<String>,
+    pub signer_info: Option<String>,
+    pub signature_verified: Option<bool>,
+    pub verification_message: Option<String>,
+    pub active_page: String,
+    pub csrf_token: String,
+}

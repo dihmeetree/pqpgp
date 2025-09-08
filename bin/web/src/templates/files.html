@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}PQPGP - File Encryption{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>📁 File Encryption & Decryption</h2>
+    <p>Encrypt and decrypt files using post-quantum cryptography. Select files using the file picker below.</p>
+    
+    {% if has_error %}
+        <div class="alert alert-error">
+            <strong>Error:</strong> {{ error.as_ref().unwrap() }}
+        </div>
+    {% endif %}
+    
+    {% if has_result %}
+        <div class="alert alert-success">
+            <strong>✅ Success!</strong> {{ result.as_ref().unwrap() }}
+            {% if signature_found %}
+                <div style="margin-top: 15px;">
+                    <a href="/files/download" class="btn btn-small">📥 Download Decrypted File</a>
+                </div>
+            {% endif %}
+        </div>
+        
+        {% if signature_found %}
+            <div class="card">
+                <h3>🔏 Digital Signature Found</h3>
+                <p><strong>Signed by:</strong> <span class="key-id">{{ signer_info.as_ref().unwrap() }}</span></p>
+                
+                {% if signature_verified.is_some() %}
+                    <div style="margin: 15px 0; padding: 15px; border-radius: 8px; {% if signature_verified.unwrap() %}background-color: #c6f6d5; border: 1px solid #9ae6b4;{% else %}background-color: #fed7d7; border: 1px solid #feb2b2;{% endif %}">
+                        <h4 style="margin-top: 0; {% if signature_verified.unwrap() %}color: #22543d;{% else %}color: #742a2a;{% endif %}">🔍 Automatic Verification Result</h4>
+                        <p style="margin-bottom: 0; font-weight: bold; {% if signature_verified.unwrap() %}color: #22543d;{% else %}color: #742a2a;{% endif %}">{{ verification_message.as_ref().unwrap() }}</p>
+                    </div>
+                {% endif %}
+                
+                <p>This file was digitally signed during encryption. 
+                {% if signature_verified.is_some() %}
+                    {% if signature_verified.unwrap() %}
+                        The signature has been automatically verified as authentic.
+                    {% else %}
+                        You can also verify the signature manually using the signature data below.
+                    {% endif %}
+                {% else %}
+                    You can verify the signature manually using the signature data below.
+                {% endif %}
+                </p>
+                
+                <details style="margin-top: 20px;">
+                    <summary style="cursor: pointer; font-weight: bold; color: #4a5568; padding: 10px 0;">
+                        📄 View Raw PGP Signature
+                    </summary>
+                    <div style="margin-top: 10px;">
+                        <div class="form-group">
+                            <label for="signature-display">PGP Signature (Copy for manual verification):</label>
+                            <textarea id="signature-display" readonly style="font-family: 'Courier New', monospace; height: 200px; background-color: #f8f9fa;">{{ signature_armored.as_ref().unwrap() }}</textarea>
+                            <small style="color: #718096; display: block; margin-top: 5px;">
+                                For manual verification, copy this signature to the <a href="/verify">Verify</a> page along with the original file content.
+                            </small>
+                        </div>
+                        
+                        <div style="margin-top: 15px; padding: 15px; background-color: #e6fffa; border: 1px solid #38b2ac; border-radius: 8px;">
+                            <h4 style="margin-top: 0; color: #2c7a7b;">📋 Manual verification steps:</h4>
+                            <ol style="margin-bottom: 0; color: #2c7a7b;">
+                                <li>Download the decrypted file using the button above</li>
+                                <li>Copy the entire signature text from the box above</li>
+                                <li>Go to the <a href="/verify" style="color: #2c7a7b; text-decoration: underline;">Verify</a> page</li>
+                                <li>Paste the file content in the "Message" field</li>
+                                <li>Paste the signature in the "Signature" field</li>
+                                <li>Click "Verify Signature" to confirm authenticity</li>
+                            </ol>
+                        </div>
+                    </div>
+                </details>
+            </div>
+        {% endif %}
+    {% endif %}
+    
+    <div class="form-section">
+        <h3>🔒 Encrypt File</h3>
+        <p>Select a file to encrypt with post-quantum cryptography. The encrypted file will be saved with a .pqpgp extension.</p>
+        
+        {% if recipients.is_empty() %}
+            <div class="alert alert-error">
+                <p><strong>No encryption keys available.</strong></p>
+                <p>You need to generate or import ML-KEM-1024 keys before you can encrypt files.</p>
+                <a href="/keys" class="btn">🔑 Manage Keys</a>
+            </div>
+        {% else %}
+            <form method="post" action="/files/encrypt" enctype="multipart/form-data">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                
+                <div class="form-group">
+                    <label for="encrypt-recipient">Recipient:</label>
+                    <select name="recipient" id="encrypt-recipient" required>
+                        <option value="">Select recipient...</option>
+                        {% for recipient in recipients %}
+                            <option value="{{ recipient.user_id }}">{{ recipient.user_id }} ({{ recipient.key_id }})</option>
+                        {% endfor %}
+                    </select>
+                    <small style="color: #718096; display: block; margin-top: 5px;">
+                        Select the recipient whose public key will be used to encrypt the file.
+                    </small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="encrypt-signing-key">Sign File (Optional):</label>
+                    <select name="signing_key" id="encrypt-signing-key">
+                        <option value="">No signing (encrypt only)</option>
+                        {% for signing_key in signing_keys %}
+                            <option value="{{ signing_key.key_id }}">{{ signing_key.user_id }} ({{ signing_key.key_id }})</option>
+                        {% endfor %}
+                    </select>
+                    <small style="color: #718096; display: block; margin-top: 5px;">
+                        Optionally sign the file with your private key for authentication.
+                    </small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="encrypt-password">Private Key Password (if required):</label>
+                    <input type="password" name="password" id="encrypt-password" placeholder="Enter password for signing key..." autocomplete="new-password">
+                    <small style="color: #718096; display: block; margin-top: 5px;">
+                        Required only if your signing key is password protected.
+                    </small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="encrypt-file">File to Encrypt:</label>
+                    <input type="file" name="file" id="encrypt-file" required>
+                    <small style="color: #718096; display: block; margin-top: 5px;">
+                        Select any file to encrypt. Maximum file size: 100MB.
+                    </small>
+                </div>
+                
+                <button type="submit" class="btn btn-primary">🔒 Encrypt File</button>
+            </form>
+        {% endif %}
+    </div>
+    
+    <div class="form-section">
+        <h3>🔓 Decrypt File</h3>
+        <p>Select an encrypted .pqpgp file to decrypt. The decrypted file will be saved with its original filename.</p>
+        
+        <form method="post" action="/files/decrypt" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            
+            <div class="form-group">
+                <label for="decrypt-password">Private Key Password (if required):</label>
+                <input type="password" name="password" id="decrypt-password" placeholder="Enter password for your private key..." autocomplete="current-password">
+                <small style="color: #718096; display: block; margin-top: 5px;">
+                    Only required if your private key is password protected.
+                </small>
+            </div>
+            
+            <div class="form-group">
+                <label for="decrypt-file">Encrypted File (.pqpgp):</label>
+                <input type="file" name="file" id="decrypt-file" accept=".pqpgp,*/*" required>
+                <small style="color: #718096; display: block; margin-top: 5px;">
+                    Select an encrypted file with .pqpgp extension to decrypt.
+                </small>
+            </div>
+            
+            <button type="submit" class="btn btn-primary">🔓 Decrypt File</button>
+        </form>
+    </div>
+</div>
+
+<style>
+.form-section {
+    margin-bottom: 40px;
+    padding: 20px;
+    background-color: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 8px;
+}
+
+.form-section:last-child {
+    margin-bottom: 0;
+}
+
+.form-section h3 {
+    margin-top: 0;
+    margin-bottom: 10px;
+    color: #374151;
+}
+
+.form-section p {
+    margin-bottom: 20px;
+    color: #6b7280;
+}
+</style>
+{% endblock %}

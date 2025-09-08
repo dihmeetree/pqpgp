@@ -2,7 +2,7 @@
 name = "pqpgp"
 version = "0.0.1"
 edition = "2021"
-authors = ["PQPGP Team"]
+authors = ["dihmeetree"]
 description = "Post-Quantum secure implementation of PGP in Rust"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/pqpgp/pqpgp"

@@ -90,6 +90,15 @@ pub async fn get_csrf_token(
     Ok(csrf_store.generate_token(&session_id))
 }
 
+/// Validate a CSRF token against the session
+pub fn validate_csrf_token(session: &Session, csrf_store: &CsrfStore, token: &str) -> bool {
+    let session_id = match session.id() {
+        Some(id) => id.to_string(),
+        None => return false,
+    };
+    csrf_store.validate_token(&session_id, token)
+}
+
 /// Form data wrapper that includes CSRF token validation
 #[derive(Debug, Deserialize, Serialize)]
 pub struct CsrfProtectedForm<T> {

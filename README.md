@@ -267,14 +267,6 @@ tests/                # Comprehensive test suite
 └── integration_tests.rs # End-to-end workflow tests
 ```
 
-## 📚 Documentation
-
-For comprehensive technical analysis, examples, and comparison with traditional PGP:
-
-- **[PQPGP vs Traditional PGP](./docs/PQPGP-vs-Traditional-PGP.md)** - Detailed comparison covering security, performance, and migration guidance
-- **[Documentation Index](./docs/README.md)** - Navigation guide for all documentation
-- **[Usage Examples](./examples/)** - Practical code examples demonstrating PQPGP functionality
-
 ## 🔧 Development
 
 ### Prerequisites
