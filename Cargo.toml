@@ -10,7 +10,7 @@ keywords = ["cryptography", "post-quantum", "pgp", "encryption", "security"]
 categories = ["cryptography", "command-line-utilities"]
 
 [workspace]
-members = [".", "bin/web"]
+members = [".", "bin/web", "bin/relay"]
 resolver = "2"
 
 [features]

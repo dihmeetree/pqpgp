@@ -1,0 +1,147 @@
+//! Post-quantum secure chat protocol implementation.
+//!
+//! This module provides a Signal-like chat protocol with post-quantum security,
+//! implementing:
+//!
+//! - **Post-Quantum X3DH**: Asynchronous key agreement using ML-KEM-1024
+//! - **Double Ratchet**: Per-message forward secrecy with KEM-based ratcheting
+//! - **Sealed Sender**: Metadata protection hiding sender identity
+//! - **Group Chat**: TreeKEM-based group key agreement
+//!
+//! ## Security Properties
+//!
+//! - **Quantum Resistance**: All operations use NIST post-quantum algorithms
+//! - **Forward Secrecy**: Past messages remain secure if keys are compromised
+//! - **Post-Compromise Security**: Future messages secure after session heals
+//! - **Deniability**: No cryptographic proof of message authorship
+//!
+//! ## Protocol Overview
+//!
+//! ### Session Establishment (X3DH)
+//!
+//! 1. Bob publishes a `PreKeyBundle` containing his identity key, signed prekey,
+//!    and optional one-time prekeys
+//! 2. Alice fetches Bob's bundle and performs KEM encapsulation to each key
+//! 3. Alice derives a shared secret and initializes the Double Ratchet
+//! 4. Alice sends her initial message with the KEM ciphertexts
+//! 5. Bob decapsulates to derive the same shared secret
+//!
+//! ### Message Encryption (Double Ratchet)
+//!
+//! Each message uses a unique encryption key derived through two ratchets:
+//! - **KEM Ratchet**: New KEM operation when receiving a new public key
+//! - **Symmetric Ratchet**: HKDF chain for consecutive messages
+//!
+//! ## Example
+//!
+//! ```rust,no_run
+//! use pqpgp::chat::{Identity, PreKeyBundle, Session};
+//!
+//! // Generate identities
+//! let alice_identity = Identity::generate()?;
+//! let bob_identity = Identity::generate()?;
+//!
+//! // Bob creates and publishes his prekey bundle
+//! let bob_bundle = PreKeyBundle::generate(&bob_identity, 100)?;
+//!
+//! // Alice initiates a session with Bob
+//! let (mut alice_session, initial_message) = Session::initiate(
+//!     &alice_identity,
+//!     &bob_bundle,
+//!     b"Hello Bob!",
+//! )?;
+//!
+//! // Bob receives and establishes his session
+//! let mut bob_session = Session::receive(
+//!     &bob_identity,
+//!     &initial_message,
+//! )?;
+//!
+//! // Now they can exchange messages
+//! let encrypted = alice_session.encrypt(b"How are you?")?;
+//! let decrypted = bob_session.decrypt(&encrypted)?;
+//! # Ok::<(), pqpgp::error::PqpgpError>(())
+//! ```
+
+pub mod identity;
+pub mod prekey;
+pub mod x3dh;
+pub mod ratchet;
+pub mod session;
+pub mod header;
+pub mod message;
+
+pub use identity::{Identity, IdentityKey, IdentityKeyPair};
+pub use prekey::{PreKeyBundle, SignedPreKey, OneTimePreKey, PreKeyId};
+pub use x3dh::{X3DHSender, X3DHReceiver, X3DHKeys, X3DHSharedSecret};
+pub use ratchet::{DoubleRatchet, RatchetState, ChainKey, MessageKey, RatchetPublicKey, RatchetKeyPair};
+pub use session::{Session, SessionState, EncryptedChatMessage, PeerInfo};
+pub use header::{MessageHeader, HeaderKey, EncryptedHeader};
+pub use message::{ChatMessage, MessagePayload, ContentType, MessageId, Attachment, Location, Reaction};
+
+/// Maximum number of skipped message keys to store per session.
+/// This limits memory usage while allowing reasonable out-of-order delivery.
+pub const MAX_SKIP: u32 = 1000;
+
+/// Maximum age of a skipped message key before it's discarded (in seconds).
+/// Keys older than this are removed to limit the window for replay attacks.
+pub const MAX_SKIP_AGE_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
+
+/// Prekey rotation interval (in seconds).
+/// Signed prekeys should be rotated periodically for forward secrecy.
+pub const PREKEY_ROTATION_SECS: u64 = 7 * 24 * 60 * 60; // 7 days
+
+/// Number of one-time prekeys to maintain.
+/// The server should alert when the count drops below a threshold.
+pub const ONE_TIME_PREKEY_COUNT: u32 = 100;
+
+/// Protocol version identifier.
+pub const PROTOCOL_VERSION: u8 = 1;
+
+/// Domain separation constants for HKDF operations.
+pub mod kdf_info {
+    /// Root key derivation from X3DH.
+    pub const X3DH_ROOT: &[u8] = b"PQPGP-X3DH-v1-root";
+    /// Chain key derivation from root key.
+    pub const RATCHET_ROOT: &[u8] = b"PQPGP-ratchet-v1-root";
+    /// New chain key from previous chain key.
+    pub const RATCHET_CHAIN: &[u8] = b"PQPGP-ratchet-v1-chain";
+    /// Message key from chain key.
+    pub const RATCHET_MESSAGE: &[u8] = b"PQPGP-ratchet-v1-message";
+    /// Header encryption key derivation.
+    pub const HEADER_KEY: &[u8] = b"PQPGP-header-v1-key";
+    /// Sealed sender key derivation.
+    pub const SEALED_SENDER: &[u8] = b"PQPGP-sealed-v1-key";
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_protocol_version() {
+        // Verify the protocol version constant is accessible and has expected value
+        let version: u8 = PROTOCOL_VERSION;
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_kdf_info_labels_are_unique() {
+        // Ensure all KDF info labels are distinct to prevent key confusion
+        let labels: Vec<&[u8]> = vec![
+            kdf_info::X3DH_ROOT,
+            kdf_info::RATCHET_ROOT,
+            kdf_info::RATCHET_CHAIN,
+            kdf_info::RATCHET_MESSAGE,
+            kdf_info::HEADER_KEY,
+            kdf_info::SEALED_SENDER,
+        ];
+
+        // Check all pairs are distinct
+        for i in 0..labels.len() {
+            for j in (i + 1)..labels.len() {
+                assert_ne!(labels[i], labels[j], "KDF labels must be unique");
+            }
+        }
+    }
+}

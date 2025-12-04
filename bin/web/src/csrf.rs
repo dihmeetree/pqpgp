@@ -9,7 +9,11 @@ use std::sync::{Arc, RwLock};
 use tower_sessions::Session;
 use uuid::Uuid;
 
-/// CSRF token store - in a production system, this would be backed by a database
+/// CSRF token store using in-memory storage.
+///
+/// This implementation uses session-bound tokens stored in memory, which is
+/// appropriate for single-instance deployments. The tokens are tied to session
+/// IDs and validated on each form submission.
 #[derive(Clone, Debug)]
 pub struct CsrfStore {
     tokens: Arc<RwLock<HashMap<String, String>>>,

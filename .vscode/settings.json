@@ -1,9 +1,9 @@
 {
   "workbench.colorTheme": "One Dark Pro",
-  "editor.fontSize": 18,
+  "editor.fontSize": 22,
   "editor.codeLens": false,
   "editor.defaultFormatter": "esbenp.prettier-vscode",
-  "terminal.integrated.fontSize": 18,
+  "terminal.integrated.fontSize": 22,
   "workbench.editor.enablePreview": false,
   "javascript.updateImportsOnFileMove.enabled": "always",
   "editor.formatOnSave": true,

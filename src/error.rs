@@ -59,6 +59,18 @@ pub enum PqpgpError {
     /// Password-related errors
     #[error("Password error: {0}")]
     Password(String),
+
+    /// Chat protocol errors
+    #[error("Chat error: {0}")]
+    Chat(String),
+
+    /// Session errors (key agreement, ratchet)
+    #[error("Session error: {0}")]
+    Session(String),
+
+    /// Prekey errors
+    #[error("Prekey error: {0}")]
+    Prekey(String),
 }
 
 impl PqpgpError {
@@ -120,5 +132,20 @@ impl PqpgpError {
     /// Creates a new password error.
     pub fn password<T: ToString>(msg: T) -> Self {
         Self::Password(msg.to_string())
+    }
+
+    /// Creates a new chat error.
+    pub fn chat<T: ToString>(msg: T) -> Self {
+        Self::Chat(msg.to_string())
+    }
+
+    /// Creates a new session error.
+    pub fn session<T: ToString>(msg: T) -> Self {
+        Self::Session(msg.to_string())
+    }
+
+    /// Creates a new prekey error.
+    pub fn prekey<T: ToString>(msg: T) -> Self {
+        Self::Prekey(msg.to_string())
     }
 }

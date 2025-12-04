@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A post-quantum digital signature
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Signature {
     /// The signature algorithm used
     pub algorithm: Algorithm,

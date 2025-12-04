@@ -1,0 +1,509 @@
+{% extends "base.html" %}
+
+{% block title %}Chat - PQPGP{% endblock %}
+
+{% block content %}
+<style>
+    .chat-container {
+        display: grid;
+        grid-template-columns: 280px 1fr;
+        gap: 20px;
+        height: calc(100vh - 300px);
+        min-height: 500px;
+    }
+
+    .contacts-panel {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .contacts-header {
+        padding: 20px;
+        border-bottom: 2px solid #e2e8f0;
+    }
+
+    .contacts-header h3 {
+        margin: 0 0 15px 0;
+        color: #2d3748;
+    }
+
+    .contacts-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 10px;
+    }
+
+    .contact-item {
+        display: flex;
+        align-items: center;
+        padding: 12px 15px;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        margin-bottom: 5px;
+        text-decoration: none;
+        color: inherit;
+    }
+
+    .contact-item:hover {
+        background-color: #f7fafc;
+    }
+
+    .contact-item.active {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+    }
+
+    .contact-avatar {
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: white;
+        font-weight: 600;
+        margin-right: 12px;
+        flex-shrink: 0;
+    }
+
+    .contact-item.active .contact-avatar {
+        background: rgba(255,255,255,0.3);
+    }
+
+    .contact-info {
+        flex: 1;
+        min-width: 0;
+    }
+
+    .contact-name {
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .contact-fingerprint {
+        font-size: 11px;
+        font-family: 'Courier New', monospace;
+        opacity: 0.7;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    .session-badge {
+        font-size: 10px;
+        padding: 2px 6px;
+        border-radius: 10px;
+        background-color: #c6f6d5;
+        color: #22543d;
+    }
+
+    .contact-item.active .session-badge {
+        background-color: rgba(255,255,255,0.3);
+        color: white;
+    }
+
+    .delete-contact-btn {
+        background: none;
+        border: none;
+        color: #e53e3e;
+        cursor: pointer;
+        padding: 4px 8px;
+        font-size: 14px;
+        opacity: 0.6;
+        transition: opacity 0.2s ease;
+        margin-left: 5px;
+    }
+
+    .delete-contact-btn:hover {
+        opacity: 1;
+    }
+
+    .contact-item.active .delete-contact-btn {
+        color: white;
+    }
+
+    .chat-panel {
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    .chat-header {
+        padding: 20px;
+        border-bottom: 2px solid #e2e8f0;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+    }
+
+    .chat-header h3 {
+        margin: 0;
+        color: #2d3748;
+    }
+
+    .messages-area {
+        flex: 1;
+        overflow-y: auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+        background-color: #f7fafc;
+    }
+
+    .message {
+        max-width: 70%;
+        padding: 12px 16px;
+        border-radius: 16px;
+        position: relative;
+    }
+
+    .message.incoming {
+        background-color: white;
+        border: 1px solid #e2e8f0;
+        align-self: flex-start;
+        border-bottom-left-radius: 4px;
+    }
+
+    .message.outgoing {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        align-self: flex-end;
+        border-bottom-right-radius: 4px;
+    }
+
+    .message-content {
+        word-wrap: break-word;
+    }
+
+    .message-time {
+        font-size: 11px;
+        opacity: 0.7;
+        margin-top: 5px;
+        text-align: right;
+    }
+
+    .message-input-area {
+        padding: 20px;
+        border-top: 2px solid #e2e8f0;
+        display: flex;
+        gap: 10px;
+    }
+
+    .message-input-area input[type="text"] {
+        flex: 1;
+        padding: 12px 16px;
+        border: 2px solid #e2e8f0;
+        border-radius: 24px;
+        font-size: 16px;
+        transition: border-color 0.3s ease;
+    }
+
+    .message-input-area input[type="text"]:focus {
+        outline: none;
+        border-color: #667eea;
+    }
+
+    .send-btn {
+        padding: 12px 24px;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border: none;
+        border-radius: 24px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+
+    .send-btn:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
+    }
+
+    .send-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        transform: none;
+    }
+
+    .no-contact-selected {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: #718096;
+        text-align: center;
+        padding: 40px;
+    }
+
+    .no-contact-selected .icon {
+        font-size: 64px;
+        margin-bottom: 20px;
+        opacity: 0.5;
+    }
+
+    .identity-info {
+        background-color: #edf2f7;
+        padding: 10px 15px;
+        border-radius: 8px;
+        font-size: 12px;
+        font-family: 'Courier New', monospace;
+        word-break: break-all;
+        overflow-wrap: break-word;
+    }
+
+    .new-contact-form {
+        padding: 15px;
+        border-top: 1px solid #e2e8f0;
+        background-color: #f7fafc;
+    }
+
+    .new-contact-form input,
+    .new-contact-form textarea {
+        width: 100%;
+        padding: 10px;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        font-size: 14px;
+        margin-bottom: 10px;
+        box-sizing: border-box;
+    }
+
+    .new-contact-form input:focus,
+    .new-contact-form textarea:focus {
+        outline: none;
+        border-color: #667eea;
+    }
+
+    .new-contact-form textarea {
+        min-height: 60px;
+        resize: vertical;
+        font-family: 'Courier New', monospace;
+        font-size: 11px;
+    }
+
+    .prekey-textarea {
+        width: 100%;
+        min-height: 80px;
+        margin-top: 8px;
+        padding: 10px;
+        border: 2px solid #e2e8f0;
+        border-radius: 8px;
+        font-size: 11px;
+        font-family: 'Courier New', monospace;
+        resize: vertical;
+        box-sizing: border-box;
+        background-color: #f7fafc;
+    }
+
+    .encryption-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 12px;
+        color: #22543d;
+        background-color: #c6f6d5;
+        padding: 4px 10px;
+        border-radius: 12px;
+    }
+
+    @media (max-width: 768px) {
+        .chat-container {
+            grid-template-columns: 1fr;
+            height: auto;
+        }
+
+        .contacts-panel {
+            max-height: 300px;
+        }
+    }
+</style>
+
+{% if has_error %}
+<div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+{% endif %}
+
+{% if has_result %}
+<div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+{% endif %}
+
+<div class="chat-container">
+    <!-- Contacts Panel -->
+    <div class="contacts-panel">
+        <div class="contacts-header">
+            <h3>Contacts</h3>
+            {% match our_identity %}
+            {% when Some with (identity) %}
+            <div class="identity-info" title="Your identity fingerprint">
+                {{ identity }}
+            </div>
+            {% match our_prekey_bundle %}
+            {% when Some with (bundle) %}
+            <details style="margin-top: 10px;">
+                <summary style="cursor: pointer; font-size: 12px; color: #667eea;">Share your prekey bundle</summary>
+                <textarea id="prekey-bundle" class="prekey-textarea" readonly>{{ bundle }}</textarea>
+                <button type="button" onclick="navigator.clipboard.writeText(document.getElementById('prekey-bundle').value)"
+                    class="btn btn-small" style="width: 100%; margin-top: 5px;">Copy Prekey Bundle</button>
+            </details>
+            {% when None %}
+            {% endmatch %}
+            <form method="POST" action="/chat/logout" style="margin-top: 10px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-small" style="width: 100%; background: #718096;">Switch Identity</button>
+            </form>
+            {% when None %}
+            {% if saved_identities.is_empty() %}
+            <form method="POST" action="/chat/generate-identity" style="margin-top: 10px;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="password" name="password" placeholder="Password to encrypt identity" required
+                    style="width: 100%; padding: 10px; border: 2px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px; box-sizing: border-box;">
+                <button type="submit" class="btn btn-small" style="width: 100%;">Generate Identity</button>
+            </form>
+            <p style="font-size: 11px; color: #718096; margin-top: 8px; text-align: center;">
+                Generate an identity to start secure chats
+            </p>
+            {% else %}
+            <div style="margin-top: 10px;">
+                <p style="font-size: 12px; color: #4a5568; margin-bottom: 10px;">Unlock saved identity:</p>
+                <form method="POST" action="/chat/unlock-identity">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <select name="fingerprint" required
+                        style="width: 100%; padding: 10px; border: 2px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px; box-sizing: border-box; font-family: 'Courier New', monospace; font-size: 11px;">
+                        {% for fp in saved_identities %}
+                        <option value="{{ fp }}">{{ fp }}</option>
+                        {% endfor %}
+                    </select>
+                    <input type="password" name="password" placeholder="Password" required
+                        style="width: 100%; padding: 10px; border: 2px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px; box-sizing: border-box;">
+                    <button type="submit" class="btn btn-small" style="width: 100%;">Unlock</button>
+                </form>
+                <details style="margin-top: 15px;">
+                    <summary style="cursor: pointer; font-size: 12px; color: #667eea;">Create new identity</summary>
+                    <form method="POST" action="/chat/generate-identity" style="margin-top: 10px;">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="password" name="password" placeholder="Password to encrypt identity" required
+                            style="width: 100%; padding: 10px; border: 2px solid #e2e8f0; border-radius: 8px; margin-bottom: 10px; box-sizing: border-box;">
+                        <button type="submit" class="btn btn-small" style="width: 100%;">Generate New Identity</button>
+                    </form>
+                </details>
+            </div>
+            {% endif %}
+            {% endmatch %}
+        </div>
+
+        <div class="contacts-list">
+            {% if contacts.is_empty() %}
+            <div style="text-align: center; padding: 20px; color: #718096;">
+                <p>No contacts yet</p>
+                <p style="font-size: 12px;">Add a contact to start chatting</p>
+            </div>
+            {% else %}
+            {% for contact in contacts %}
+            <div class="contact-item {% if contact.is_selected %}active{% endif %}">
+                <a href="/chat?contact={{ contact.fingerprint }}" style="display: contents; color: inherit; text-decoration: none;">
+                    <div class="contact-avatar">{{ contact.initial }}</div>
+                    <div class="contact-info">
+                        <div class="contact-name">{{ contact.name }}</div>
+                        <div class="contact-fingerprint">{{ contact.fingerprint }}</div>
+                    </div>
+                </a>
+                {% if contact.has_session %}
+                <span class="session-badge">Active</span>
+                {% endif %}
+                <form method="POST" action="/chat/delete-contact/{{ contact.fingerprint }}" style="display: inline;">
+                    <button type="submit" class="delete-contact-btn" title="Delete contact" onclick="return confirm('Delete this contact?');">✕</button>
+                </form>
+            </div>
+            {% endfor %}
+            {% endif %}
+        </div>
+
+        <div class="new-contact-form">
+            <form method="POST" action="/chat/add-contact">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="text" name="name" placeholder="Name" required>
+                <textarea name="prekey_bundle" placeholder="Prekey bundle" required></textarea>
+                <button type="submit" class="btn btn-small" style="width: 100%;">Add Contact</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Chat Panel -->
+    <div class="chat-panel">
+        {% match selected_contact %}
+        {% when Some with (contact_id) %}
+        <div class="chat-header">
+            <div>
+                <h3>{% match selected_contact_name %}{% when Some with (name) %}{{ name }}{% when None %}Unknown{% endmatch %}</h3>
+                <span class="encryption-badge">
+                    <span>&#128274;</span> Post-Quantum Encrypted
+                </span>
+            </div>
+            <form method="POST" action="/chat/fetch-messages">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="current_contact" value="{{ contact_id }}">
+                <button type="submit" class="btn btn-small" title="Check for new messages">Refresh</button>
+            </form>
+        </div>
+
+        <div class="messages-area" id="messages">
+            {% if messages.is_empty() %}
+            <div class="no-contact-selected">
+                <div class="icon">&#128172;</div>
+                <p>No messages yet</p>
+                <p style="font-size: 14px;">Send a message to start the conversation</p>
+            </div>
+            {% else %}
+            {% for msg in messages %}
+            <div class="message {% if msg.is_outgoing %}outgoing{% else %}incoming{% endif %}">
+                <div class="message-content">{{ msg.content }}</div>
+                <div class="message-time">{{ msg.timestamp }}</div>
+            </div>
+            {% endfor %}
+            {% endif %}
+        </div>
+
+        <div class="message-input-area">
+            <form method="POST" action="/chat/send" style="display: contents;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="recipient" value="{{ contact_id }}">
+                <input type="text" name="message" placeholder="Type a message..." autocomplete="off" required autofocus>
+                <button type="submit" class="send-btn">Send</button>
+            </form>
+        </div>
+        {% when None %}
+        <div class="no-contact-selected">
+            <div class="icon">&#128172;</div>
+            <h3>Select a contact</h3>
+            <p>Choose a contact from the list to start a secure conversation</p>
+            <p style="font-size: 14px; margin-top: 20px;">
+                All messages are encrypted with post-quantum cryptography<br>
+                using ML-KEM-1024 and the Double Ratchet protocol
+            </p>
+        </div>
+        {% endmatch %}
+    </div>
+</div>
+
+<script>
+// Auto-scroll to bottom of messages
+document.addEventListener('DOMContentLoaded', function() {
+    const messagesArea = document.getElementById('messages');
+    if (messagesArea) {
+        messagesArea.scrollTop = messagesArea.scrollHeight;
+    }
+});
+</script>
+{% endblock %}

@@ -1,13 +1,13 @@
 ```bash
- /$$$$$$$   /$$$$$$  /$$$$$$$   /$$$$$$  /$$$$$$$ 
+ /$$$$$$$   /$$$$$$  /$$$$$$$   /$$$$$$  /$$$$$$$
 | $$__  $$ /$$__  $$| $$__  $$ /$$__  $$| $$__  $$
 | $$  \ $$| $$  \ $$| $$  \ $$| $$  \__/| $$  \ $$
 | $$$$$$$/| $$  | $$| $$$$$$$/| $$ /$$$$| $$$$$$$/
-| $$____/ | $$  | $$| $$____/ | $$|_  $$| $$____/ 
-| $$      | $$/$$ $$| $$      | $$  \ $$| $$      
-| $$      |  $$$$$$/| $$      |  $$$$$$/| $$      
-|__/       \____ $$$|__/       \______/ |__/      
-                \__/                              
+| $$____/ | $$  | $$| $$____/ | $$|_  $$| $$____/
+| $$      | $$/$$ $$| $$      | $$  \ $$| $$
+| $$      |  $$$$$$/| $$      |  $$$$$$/| $$
+|__/       \____ $$$|__/       \______/ |__/
+                \__/
 ```
 
 # Post-Quantum Pretty Good Privacy
@@ -18,8 +18,9 @@ A post-quantum secure implementation of PGP (Pretty Good Privacy) in Rust, provi
 
 - **Post-Quantum Cryptography**: Uses NIST-standardized ML-KEM-1024 and ML-DSA-87 algorithms
 - **Hybrid Approach**: Combines classical and post-quantum algorithms for maximum security
-- **Advanced Key Derivation**: HKDF-SHA3-512 with deterministic nonce generation eliminates reuse vulnerabilities
-- **Perfect Forward Secrecy**: Each message gets unique keys derived from quantum-resistant shared secrets
+- **Signal Protocol Inspired Chat**: X3DH key exchange + Double Ratchet with post-quantum primitives
+- **Perfect Forward Secrecy**: Each message gets unique keys; one-time prekeys and ratcheting provide break-in recovery
+- **Random Nonces**: Cryptographically random nonces for every encryption operation
 - **Password Protection**: Optional Argon2id-based password encryption for private keys
 - **PGP Compatible**: Standard PGP packet formats (RFC 4880) with new algorithm identifiers
 - **Production Security**: Comprehensive input validation, rate limiting, and attack prevention
@@ -104,33 +105,53 @@ assert_eq!(message, original_message);
 
 ### Web Interface
 
-PQPGP also provides a web interface for easy key management and cryptographic operations:
+PQPGP provides a web interface for easy key management, cryptographic operations, and **end-to-end encrypted chat**:
 
 ```bash
-# Build both CLI and web interface
-cargo build --release
+# Build everything
+cargo build --release --workspace
+
+# Start the relay server (for multi-user chat)
+./target/release/pqpgp-relay
+# Relay runs on http://localhost:3001
 
 # Start the web server
 ./target/release/pqpgp-web
-
-# The interface will be available at http://localhost:3000
+# Web UI available at http://localhost:3000
 ```
 
-The web interface is now a separate binary with its own dependencies, providing better separation of concerns:
+**Web Interface Features:**
 
-**Benefits of Separate Web Binary:**
-- 🚀 **Faster CLI builds** - Core library doesn't include web dependencies
-- 🔧 **Modular architecture** - Web and CLI can evolve independently  
-- 📦 **Smaller deployments** - Deploy only the components you need
-- 🛡️ **Security isolation** - Web-specific dependencies don't affect core crypto
-
-The web interface provides:
 - Key generation and management
 - Sign-then-encrypt workflow (traditional PGP compatibility)
 - Decrypt-then-verify workflow with signed message parsing
 - Key import/export functionality
+- **Post-quantum encrypted chat** with Signal Protocol-inspired design
 - User-friendly forms with CSRF protection
 - Session-based security for web operations
+
+### Message Relay Server
+
+For multi-user chat across different server instances, PQPGP includes a dedicated relay server:
+
+```bash
+# Run with default settings (localhost:3001)
+./target/release/pqpgp-relay
+
+# Run on custom address (for production deployment)
+./target/release/pqpgp-relay --bind 0.0.0.0:8080
+
+# Configure web server to use custom relay
+PQPGP_RELAY_URL=http://your-relay:8080 ./target/release/pqpgp-web
+```
+
+**Relay Server Features:**
+
+- User registration with prekey bundles
+- Message queuing for offline recipients
+- User discovery endpoint
+- Stateless design (messages deleted after delivery)
+- Cryptographically random message IDs
 
 ## 🔑 Password Protection
 
@@ -167,50 +188,107 @@ let signature = sign_message(keypair.private_key(), message, Some(&password))?;
 - **Forward Secure**: Changing password doesn't reveal previous keys
 - **Timing Attack Resistant**: Constant-time operations prevent information leakage
 
+## 💬 Post-Quantum Chat Protocol
+
+PQPGP implements an end-to-end encrypted chat system inspired by the Signal Protocol, but using post-quantum cryptographic primitives:
+
+### Protocol Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     X3DH Key Exchange                           │
+├─────────────────────────────────────────────────────────────────┤
+│  Alice                                              Bob         │
+│    │                                                  │         │
+│    │  1. Fetch Bob's prekey bundle                    │         │
+│    │<─────────────────────────────────────────────────│         │
+│    │                                                  │         │
+│    │  2. Generate ephemeral ML-KEM keys               │         │
+│    │  3. Encapsulate to signed prekey (ML-KEM-1024)   │         │
+│    │  4. Encapsulate to one-time prekey               │         │
+│    │  5. Derive shared secret (HKDF-SHA3-512)         │         │
+│    │                                                  │         │
+│    │  6. Send initial message + KEM ciphertexts       │         │
+│    │─────────────────────────────────────────────────>│         │
+│    │                                                  │         │
+│    │     Bob decapsulates, derives same secret        │         │
+└─────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────┐
+│                    Double Ratchet                               │
+├─────────────────────────────────────────────────────────────────┤
+│  • Symmetric ratchet: Each message advances chain key           │
+│  • DH ratchet: Periodic ML-KEM exchanges for forward secrecy    │
+│  • Message encryption: AES-256-GCM with random nonces           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Security Properties
+
+| Property                  | Implementation                                         |
+| ------------------------- | ------------------------------------------------------ |
+| **Post-Quantum Security** | ML-KEM-1024 for key exchange, ML-DSA-87 for signatures |
+| **Forward Secrecy**       | One-time prekeys + Double Ratchet DH steps             |
+| **Break-in Recovery**     | DH ratchet heals session after key compromise          |
+| **Authentication**        | Identity keys sign prekey bundles                      |
+| **Replay Protection**     | Message numbers + unique nonces per message            |
+| **Identity Verification** | Fingerprint comparison for out-of-band verification    |
+
+### Chat Module Structure
+
+```
+src/chat/
+├── identity.rs    # ML-DSA-87 identity key pairs
+├── prekey.rs      # Signed prekeys + one-time prekeys (ML-KEM-1024)
+├── x3dh.rs        # Extended Triple Diffie-Hellman key exchange
+├── ratchet.rs     # Double Ratchet with ML-KEM
+├── session.rs     # Session management and message encryption
+├── message.rs     # Chat message types and serialization
+└── header.rs      # Encrypted message headers
+```
+
 ## 🔑 Advanced Key Derivation (HKDF)
 
-PQPGP implements state-of-the-art key derivation using HKDF-SHA3-512 to eliminate common cryptographic vulnerabilities:
+PQPGP implements state-of-the-art key derivation using HKDF-SHA3-512:
 
-### Key Security Improvements
+### Security Features
 
-- **Deterministic Nonce Generation**: HKDF derives nonces from the ML-KEM shared secret, completely eliminating dangerous nonce reuse attacks
-- **Perfect Forward Secrecy**: Each message gets unique AES-256 keys and nonces derived from the quantum-resistant shared secret
-- **Domain Separation**: Different contexts (key vs nonce, message index) produce completely different cryptographic material
-- **Cryptographic Binding**: Keys are bound to recipient identity and KEM ciphertext to prevent substitution attacks
-- **No RNG Dependencies**: Eliminates vulnerabilities from weak random number generators
+- **Random Nonces**: Each encryption operation uses a fresh cryptographically random nonce (12 bytes from OsRng)
+- **Perfect Forward Secrecy**: Unique AES-256 keys derived for each message via the ratchet
+- **Domain Separation**: Different HKDF info strings for different key types prevent cross-protocol attacks
+- **Cryptographic Binding**: Keys are bound to both party identities via associated data
 
 ### Technical Implementation
 
 ```rust
-// HKDF derives both AES-256 key and nonce from ML-KEM shared secret
-let hk = Hkdf::<Sha3_512>::new(Some(&salt), shared_secret.as_bytes());
+// Message key derivation from ratchet chain
+let aes_key = message_key.derive_aes_key()?;  // HKDF-SHA3-512
 
-// Derive AES-256 key with domain separation
-let mut aes_key_material = [0u8; 32];
-hk.expand(b"PQPGP-v1 AES-256-GCM key", &mut aes_key_material)?;
+// Random nonce for each encryption (prepended to ciphertext)
+let mut nonce = [0u8; 12];
+OsRng.fill_bytes(&mut nonce);
 
-// Derive deterministic nonce with different domain
-let mut nonce_bytes = [0u8; 12];
-hk.expand(b"PQPGP-v1 AES-GCM nonce", &mut nonce_bytes)?;
+// AES-256-GCM encryption with associated data
+let ciphertext = aes_gcm.encrypt(nonce, Payload { msg, aad })?;
 ```
 
 ### Security Benefits
 
-- **Eliminates nonce reuse catastrophes**: Traditional random nonce generation can fail; deterministic derivation cannot
+- **No nonce reuse**: Random nonces eliminate deterministic nonce vulnerabilities
 - **Quantum-resistant key expansion**: Based on quantum-resistant ML-KEM shared secrets
 - **Cryptographically secure**: HKDF is proven secure in the random oracle model
 - **Standards-based**: Implements RFC 5869 with SHA3-512 for quantum resistance
 
 ## 🔐 Cryptographic Algorithms
 
-| Operation | Algorithm | NIST Standard | Key Size |
-|-----------|-----------|---------------|----------|
-| Key Encapsulation | ML-KEM-1024 | FIPS 203 | 1,568 bytes |
-| Digital Signatures | ML-DSA-87 | FIPS 204 | 2,592 bytes |
-| Symmetric Encryption | AES-256-GCM | FIPS 197 | 32 bytes |
-| Key Derivation | HKDF-SHA3-512 | RFC 5869 | Variable |
-| Hashing | SHA3-512 | FIPS 202 | 64 bytes |
-| Password Hashing | Argon2id | RFC 9106 | 32 bytes |
+| Operation            | Algorithm     | NIST Standard | Key Size    |
+| -------------------- | ------------- | ------------- | ----------- |
+| Key Encapsulation    | ML-KEM-1024   | FIPS 203      | 1,568 bytes |
+| Digital Signatures   | ML-DSA-87     | FIPS 204      | 2,592 bytes |
+| Symmetric Encryption | AES-256-GCM   | FIPS 197      | 32 bytes    |
+| Key Derivation       | HKDF-SHA3-512 | RFC 5869      | Variable    |
+| Hashing              | SHA3-512      | FIPS 202      | 64 bytes    |
+| Password Hashing     | Argon2id      | RFC 9106      | 32 bytes    |
 
 ## 🛡️ Security Testing
 
@@ -231,6 +309,7 @@ cargo test --release
 ## 📦 Architecture
 
 ### Core Library Structure
+
 ```
 src/
 ├── crypto/           # Post-quantum cryptographic operations
@@ -238,6 +317,13 @@ src/
 │   ├── signature.rs  # ML-DSA-87 digital signatures
 │   ├── password.rs   # Argon2id password-based key protection
 │   └── keys.rs       # Key generation and management
+├── chat/             # End-to-end encrypted chat protocol
+│   ├── identity.rs   # ML-DSA-87 identity key pairs
+│   ├── prekey.rs     # Signed & one-time prekeys (ML-KEM-1024)
+│   ├── x3dh.rs       # X3DH key exchange
+│   ├── ratchet.rs    # Double Ratchet algorithm
+│   ├── session.rs    # Session management
+│   └── message.rs    # Chat message types
 ├── packet/           # PGP packet format implementation
 ├── validation/       # Security validation and rate limiting
 ├── keyring/          # Key storage and management
@@ -245,18 +331,40 @@ src/
 └── cli/              # Command-line interface
 ```
 
-### Web Interface (Separate Binary)
+### Web Interface (bin/web)
+
 ```
 bin/web/
-├── Cargo.toml        # Web-specific dependencies (axum, askama, etc.)
+├── Cargo.toml        # Web-specific dependencies (axum, askama, reqwest)
 └── src/
-    ├── main.rs       # Web server and HTTP handlers
+    ├── main.rs       # Web server, HTTP handlers, chat endpoints
+    ├── chat_state.rs # Chat session state management
+    ├── relay_client.rs # HTTP client for relay server
+    ├── storage.rs    # Encrypted persistent storage
     ├── csrf.rs       # CSRF protection
-    ├── templates.rs  # Askama template definitions
-    └── templates/    # HTML templates with HKDF documentation
+    └── templates/    # HTML templates
+```
+
+### Relay Server (bin/relay)
+
+```
+bin/relay/
+├── Cargo.toml        # Relay server dependencies
+└── src/
+    └── main.rs       # Message relay server
+        # Endpoints:
+        # POST   /register         - Register user with prekey bundle
+        # DELETE /register/:fp     - Unregister user
+        # GET    /users            - List registered users
+        # GET    /users/:fp        - Get user's prekey bundle
+        # POST   /messages/:fp     - Send message to recipient
+        # GET    /messages/:fp     - Fetch pending messages
+        # GET    /health           - Health check
+        # GET    /stats            - Server statistics
 ```
 
 ### Testing & Examples
+
 ```
 examples/             # Usage examples and demonstrations
 tests/                # Comprehensive test suite
@@ -271,7 +379,7 @@ tests/                # Comprehensive test suite
 
 ### Prerequisites
 
-- Rust 1.75+ 
+- Rust 1.75+
 - Cargo
 
 ### Building
@@ -310,7 +418,7 @@ cargo bench
 - **RFC 5869**: HMAC-based Extract-and-Expand Key Derivation Function (HKDF)
 - **RFC 9106**: The Argon2 Memory-Hard Function for Password Hashing and Proof-of-Work Applications
 - **NIST FIPS 203**: ML-KEM (Module-Lattice-Based Key-Encapsulation Mechanism)
-- **NIST FIPS 204**: ML-DSA (Module-Lattice-Based Digital Signature Algorithm)  
+- **NIST FIPS 204**: ML-DSA (Module-Lattice-Based Digital Signature Algorithm)
 - **NIST FIPS 197**: Advanced Encryption Standard (AES)
 - **NIST FIPS 202**: SHA-3 Standard
 

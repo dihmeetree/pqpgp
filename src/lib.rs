@@ -49,6 +49,7 @@
 //! ```
 
 pub mod armor;
+pub mod chat;
 pub mod cli;
 pub mod crypto;
 pub mod error;

@@ -126,3 +126,40 @@ pub struct FilesTemplate {
     pub active_page: String,
     pub csrf_token: String,
 }
+
+/// Chat contact information
+#[derive(Debug, Clone)]
+pub struct ChatContact {
+    pub fingerprint: String,
+    pub name: String,
+    pub has_session: bool,
+    pub is_selected: bool,
+    pub initial: char,
+}
+
+/// Chat message for display
+#[derive(Debug, Clone)]
+pub struct ChatMessageDisplay {
+    pub content: String,
+    pub timestamp: String,
+    pub is_outgoing: bool,
+}
+
+/// Chat template
+#[derive(Template)]
+#[template(path = "chat.html")]
+pub struct ChatTemplate {
+    pub active_page: String,
+    pub csrf_token: String,
+    pub contacts: Vec<ChatContact>,
+    pub selected_contact: Option<String>,
+    pub selected_contact_name: Option<String>,
+    pub messages: Vec<ChatMessageDisplay>,
+    pub our_identity: Option<String>,
+    pub our_prekey_bundle: Option<String>,
+    pub saved_identities: Vec<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub has_result: bool,
+    pub has_error: bool,
+}
