@@ -155,9 +155,9 @@ PQPGP includes a cryptographically-secured forum system built on a Directed Acyc
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       DAG STRUCTURE                          │
+│                       DAG STRUCTURE                         │
 ├─────────────────────────────────────────────────────────────┤
-│                                                              │
+│                                                             │
 │   ForumGenesis ──┬──> BoardGenesis ──┬──> ThreadRoot        │
 │   (root)         │    (board A)      │    (thread 1)        │
 │                  │                   │         │            │
@@ -170,8 +170,8 @@ PQPGP includes a cryptographically-secured forum system built on a Directed Acyc
 │                  │                   │                      │
 │                  └──> BoardGenesis ──┴──> ...               │
 │                       (board B)                             │
-│                                                              │
-│   Each node:                                                 │
+│                                                             │
+│   Each node:                                                │
 │   • content_hash = SHA3-512(bincode::serialize(content))    │
 │   • signature = ML-DSA-87(content, author_private_key)      │
 │   • References parent(s) by content_hash                    │
