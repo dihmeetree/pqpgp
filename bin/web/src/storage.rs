@@ -177,7 +177,10 @@ impl ChatStorage {
                 // Try to read the fingerprint from the file
                 if let Ok(file_bytes) = fs::read(&path) {
                     if let Ok(user_data) = bincode::deserialize::<EncryptedUserData>(&file_bytes) {
-                        fingerprints.push(user_data.fingerprint);
+                        // Only include non-empty fingerprints
+                        if !user_data.fingerprint.is_empty() {
+                            fingerprints.push(user_data.fingerprint);
+                        }
                     }
                 }
             }

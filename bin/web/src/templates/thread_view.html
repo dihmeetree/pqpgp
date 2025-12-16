@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+
+{% block title %}{{ thread_title }} - PQPGP Forums{% endblock %}
+
+{% block content %}
+<p><a href="/forum/{{ forum_hash }}/board/{{ board_hash }}" class="btn">&larr; Back to {{ board_name }}</a></p>
+
+<div class="card">
+    <h2>{{ thread_title }}</h2>
+    <p style="color: #718096; font-size: 0.9em;">
+        In board: <strong>{{ board_name }}</strong> &nbsp;|&nbsp; Forum: <strong>{{ forum_name }}</strong>
+    </p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    <!-- Original post -->
+    <div style="background: #f7fafc; padding: 20px; border-radius: 8px; margin: 20px 0; border-left: 4px solid #667eea;">
+        <div style="white-space: pre-wrap; font-size: 1.05em;">{{ thread_body }}</div>
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #e2e8f0; color: #718096; font-size: 0.85em;">
+            <span class="key-id">{{ thread_author_short }}</span>
+            &nbsp;|&nbsp; {{ thread_created_at_display }}
+        </div>
+    </div>
+
+    <!-- Replies -->
+    <h3>Replies ({{ posts.len() }})</h3>
+    {% if posts.is_empty() %}
+    <p style="color: #718096; font-style: italic;">No replies yet. Be the first to respond!</p>
+    {% else %}
+    {% for post in posts %}
+    <div style="background: white; padding: 20px; border-radius: 8px; margin: 15px 0; border: 1px solid #e2e8f0;">
+        {% if post.quote_body.is_some() %}
+        <div style="background: #edf2f7; padding: 10px 15px; border-radius: 4px; margin-bottom: 15px; border-left: 3px solid #718096; color: #4a5568; font-size: 0.9em;">
+            <em>Quoting:</em><br>
+            <div style="white-space: pre-wrap;">{{ post.quote_body.as_ref().unwrap() }}</div>
+        </div>
+        {% endif %}
+        <div style="white-space: pre-wrap;">{{ post.body }}</div>
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid #e2e8f0; color: #718096; font-size: 0.85em;">
+            <span class="key-id">{{ post.author_short }}</span>
+            &nbsp;|&nbsp; {{ post.created_at_display }}
+            &nbsp;|&nbsp;
+            <a href="#reply_form" class="btn btn-small" style="padding: 4px 12px; font-size: 12px;">Quote</a>
+        </div>
+    </div>
+    {% endfor %}
+    {% endif %}
+</div>
+
+<div class="card" id="reply_form">
+    <h2>Post Reply</h2>
+    <form method="post" action="/forum/{{ forum_hash }}/thread/{{ thread_hash }}/reply">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="quote_hash" value="">
+
+        <div class="form-group">
+            <label for="reply_body">Your Reply</label>
+            <textarea id="reply_body" name="body" required maxlength="102400"
+                      style="height: 150px;"
+                      placeholder="Write your reply..."></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="signing_key">Your Signing Key</label>
+            <select id="signing_key" name="signing_key" required>
+                <option value="">-- Select your signing key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="key_password">Key Password (if protected)</label>
+            <input type="password" id="key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Post Reply</button>
+    </form>
+</div>
+
+{% if is_moderator %}
+<div class="card">
+    <h2>Moderation Actions</h2>
+    <p style="color: #718096;">As a moderator, you can hide threads and posts. Hidden content remains in the DAG for auditability but is not displayed publicly.</p>
+
+    <h3>Delete This Thread</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/thread/{{ thread_hash }}/hide">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="hide_thread_signing_key">Your Moderator Key</label>
+            <select id="hide_thread_signing_key" name="signing_key" required>
+                <option value="">-- Select your moderator key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="hide_thread_password">Key Password (if protected)</label>
+            <input type="password" id="hide_thread_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn btn-danger">Delete Thread</button>
+    </form>
+
+    {% if !posts.is_empty() %}
+    <h3 style="margin-top: 2em;">Delete a Post</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/thread/{{ thread_hash }}/hide_post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="hide_post_hash">Select Post to Delete</label>
+            <select id="hide_post_hash" name="post_hash" required>
+                <option value="">-- Select post --</option>
+                {% for post in posts %}
+                <option value="{{ post.hash }}">{{ post.author_short }} - {{ post.created_at_display }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="hide_post_signing_key">Your Moderator Key</label>
+            <select id="hide_post_signing_key" name="signing_key" required>
+                <option value="">-- Select your moderator key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="hide_post_password">Key Password (if protected)</label>
+            <input type="password" id="hide_post_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn btn-danger">Delete Post</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
+
+<p><a href="/forum/{{ forum_hash }}/board/{{ board_hash }}" class="btn">&larr; Back to {{ board_name }}</a></p>
+{% endblock %}

@@ -403,6 +403,8 @@
             {% endmatch %}
         </div>
 
+        {% match our_identity %}
+        {% when Some with (_) %}
         <div class="contacts-list">
             {% if contacts.is_empty() %}
             <div style="text-align: center; padding: 20px; color: #718096;">
@@ -438,6 +440,9 @@
                 <button type="submit" class="btn btn-small" style="width: 100%;">Add Contact</button>
             </form>
         </div>
+        {% when None %}
+        <!-- Don't show contacts list until identity is unlocked -->
+        {% endmatch %}
     </div>
 
     <!-- Chat Panel -->

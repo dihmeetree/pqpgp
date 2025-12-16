@@ -222,6 +222,7 @@
     <thead>
       <tr>
         <th>Key ID</th>
+        <th>Fingerprint</th>
         <th>Algorithm</th>
         <th>User IDs</th>
         <th>Private Key</th>
@@ -232,6 +233,7 @@
       {% for key in keys %}
       <tr>
         <td><span class="key-id">{{ key.key_id }}</span></td>
+        <td><span class="key-id">{{ key.fingerprint }}</span></td>
         <td>
           {% if key.algorithm == "ML-KEM-1024" %}
           <span

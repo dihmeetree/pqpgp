@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+
+{% block title %}{{ board_name }} - PQPGP Forums{% endblock %}
+
+{% block content %}
+<p><a href="/forum/{{ forum_hash }}" class="btn">&larr; Back to {{ forum_name }}</a></p>
+
+<div class="card">
+    <h2>{{ board_name }}</h2>
+    <p>{{ board_description }}</p>
+    <p style="color: #718096; font-size: 0.9em;">
+        In forum: <strong>{{ forum_name }}</strong>
+        &nbsp;|&nbsp;
+        {% for tag in board_tags %}
+        <span class="status-badge status-success">{{ tag }}</span>
+        {% endfor %}
+    </p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    <h3>Board Moderators</h3>
+    {% if board_moderators.is_empty() %}
+    <p style="color: #718096; font-style: italic;">No board-specific moderators assigned. Forum moderators can manage this board.</p>
+    {% else %}
+    <ul style="margin: 0.5em 0; padding-left: 1.5em;">
+        {% for mod in board_moderators %}
+        <li>
+            <span class="key-id">{{ mod.identity_fingerprint }}</span>
+            <span class="status-badge status-warning">Board Moderator</span>
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <h3>Threads</h3>
+    {% if threads.is_empty() %}
+    <p style="color: #718096; font-style: italic;">No threads yet. Start a discussion below!</p>
+    {% else %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Thread Title</th>
+                <th>Preview</th>
+                <th>Author</th>
+                <th>Replies</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for thread in threads %}
+            <tr>
+                <td><strong>{{ thread.title }}</strong></td>
+                <td style="color: #718096; max-width: 300px; overflow: hidden; text-overflow: ellipsis;">{{ thread.body_preview }}</td>
+                <td><span class="key-id">{{ thread.author_short }}</span></td>
+                <td>{{ thread.post_count }}</td>
+                <td>{{ thread.created_at_display }}</td>
+                <td>
+                    <a href="/forum/{{ forum_hash }}/thread/{{ thread.hash }}" class="btn btn-small">View Thread</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Start New Thread</h2>
+    <form method="post" action="/forum/{{ forum_hash }}/board/{{ board_hash }}/thread/create">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="thread_title">Thread Title</label>
+            <input type="text" id="thread_title" name="title" required maxlength="200"
+                   placeholder="What do you want to discuss?">
+        </div>
+
+        <div class="form-group">
+            <label for="thread_body">Message</label>
+            <textarea id="thread_body" name="body" required maxlength="102400"
+                      style="height: 200px;"
+                      placeholder="Write your message here..."></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="signing_key">Your Signing Key</label>
+            <select id="signing_key" name="signing_key" required>
+                <option value="">-- Select your signing key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="key_password">Key Password (if protected)</label>
+            <input type="password" id="key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Create Thread</button>
+    </form>
+</div>
+
+{% if is_forum_moderator %}
+<div class="card">
+    <h2>Edit Board</h2>
+    <p style="color: #718096;">As a forum moderator, you can edit the board name and description.</p>
+    <form method="post" action="/forum/{{ forum_hash }}/board/{{ board_hash }}/edit">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="edit_board_name">New Board Name (leave empty to keep current)</label>
+            <input type="text" id="edit_board_name" name="new_name" maxlength="100"
+                   placeholder="{{ board_name }}">
+        </div>
+
+        <div class="form-group">
+            <label for="edit_board_description">New Description (leave empty to keep current)</label>
+            <textarea id="edit_board_description" name="new_description" maxlength="5000"
+                      placeholder="{{ board_description }}"></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="edit_board_signing_key">Your Signing Key (moderator key)</label>
+            <select id="edit_board_signing_key" name="signing_key" required>
+                <option value="">-- Select your moderator key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="edit_board_password">Key Password (if protected)</label>
+            <input type="password" id="edit_board_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Update Board</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Manage Board Moderators</h2>
+    <p style="color: #718096;">As a forum moderator, you can add or remove board-specific moderators.</p>
+
+    <h3>Add Board Moderator</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/board/{{ board_hash }}/moderator/add">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="add_target_fingerprint">User's Key (select from keyring)</label>
+            <select id="add_target_fingerprint" name="target_fingerprint" required>
+                <option value="">-- Select user to add as board moderator --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.fingerprint }}">{{ key.fingerprint }} ({{ key.user_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="add_signing_key">Your Signing Key (forum moderator key)</label>
+            <select id="add_signing_key" name="signing_key" required>
+                <option value="">-- Select your moderator key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="add_key_password">Key Password (if protected)</label>
+            <input type="password" id="add_key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Add Board Moderator</button>
+    </form>
+
+    {% if !board_moderators.is_empty() %}
+    <h3 style="margin-top: 2em;">Remove Board Moderator</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/board/{{ board_hash }}/moderator/remove">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="remove_target_fingerprint">Board Moderator to Remove</label>
+            <select id="remove_target_fingerprint" name="target_fingerprint" required>
+                <option value="">-- Select board moderator to remove --</option>
+                {% for key in signing_keys %}
+                {% for mod in board_moderators %}
+                {% if key.fingerprint == mod.identity_fingerprint %}
+                <option value="{{ key.fingerprint }}">{{ key.fingerprint }} ({{ key.user_id }})</option>
+                {% endif %}
+                {% endfor %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="remove_signing_key">Your Signing Key (forum moderator key)</label>
+            <select id="remove_signing_key" name="signing_key" required>
+                <option value="">-- Select your moderator key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="remove_key_password">Key Password (if protected)</label>
+            <input type="password" id="remove_key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn btn-danger">Remove Board Moderator</button>
+    </form>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Hide Board</h2>
+    <p style="color: #718096;">As a forum moderator, you can hide this board. Hidden boards are not shown in the board list but remain in the DAG.</p>
+    <form method="post" action="/forum/{{ forum_hash }}/board/{{ board_hash }}/hide">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="hide_board_signing_key">Your Signing Key (moderator key)</label>
+            <select id="hide_board_signing_key" name="signing_key" required>
+                <option value="">-- Select your moderator key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="hide_board_password">Key Password (if protected)</label>
+            <input type="password" id="hide_board_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn btn-danger">Hide Board</button>
+    </form>
+</div>
+{% endif %}
+
+{% endblock %}

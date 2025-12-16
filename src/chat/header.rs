@@ -38,7 +38,6 @@ pub const HEADER_KEY_SIZE: usize = 32;
 /// A key used to encrypt message headers.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct HeaderKey {
-    #[zeroize(skip)]
     key: [u8; HEADER_KEY_SIZE],
 }
 

@@ -53,6 +53,7 @@ pub mod chat;
 pub mod cli;
 pub mod crypto;
 pub mod error;
+pub mod forum;
 pub mod keyring;
 pub mod packet;
 pub mod validation;

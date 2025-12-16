@@ -16,23 +16,36 @@ use pqpgp::{
         Password,
     },
 };
+use std::sync::Arc;
+use std::time::Duration;
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
+use axum::http::{header, HeaderValue};
 use tower_sessions::{MemoryStore, Session, SessionManagerLayer};
 use tracing::{error, info, instrument, warn};
 use tracing_subscriber::EnvFilter;
 
 mod chat_state;
 mod csrf;
+mod forum_handlers;
+mod forum_persistence;
 mod relay_client;
 mod storage;
 mod templates;
 use chat_state::{create_shared_state_manager, SharedChatStateManager};
 use csrf::{get_csrf_token, validate_csrf_token, CsrfProtectedForm, CsrfStore};
+use forum_persistence::WebForumPersistence;
 use relay_client::{create_relay_client, SharedRelayClient};
 use storage::ChatStorage;
 use templates::{FilesTemplate, SigningKeyInfo, *};
+
+/// Shared forum persistence for local DAG storage.
+pub type SharedForumPersistence = Arc<WebForumPersistence>;
+
+/// Default forum sync interval in seconds.
+const FORUM_SYNC_INTERVAL_SECS: u64 = 30;
 
 /// Form data for key generation
 #[derive(Debug, Deserialize)]
@@ -110,11 +123,13 @@ struct UnlockIdentityForm {
 
 /// Application state shared across all handlers
 #[derive(Clone)]
-struct AppState {
-    csrf_store: CsrfStore,
-    chat_states: SharedChatStateManager,
+pub struct AppState {
+    pub csrf_store: CsrfStore,
+    pub chat_states: SharedChatStateManager,
     /// Client for communicating with the dedicated relay server
-    relay_client: SharedRelayClient,
+    pub relay_client: SharedRelayClient,
+    /// Forum persistence for local DAG storage
+    pub forum_persistence: SharedForumPersistence,
 }
 
 impl std::fmt::Debug for AppState {
@@ -123,7 +138,52 @@ impl std::fmt::Debug for AppState {
             .field("csrf_store", &"CsrfStore { ... }")
             .field("chat_states", &"SharedChatStateManager { ... }")
             .field("relay_client", &"SharedRelayClient { ... }")
+            .field("forum_persistence", &"SharedForumPersistence { ... }")
             .finish()
+    }
+}
+
+/// Background task that periodically syncs all locally-tracked forums.
+async fn forum_sync_task(persistence: SharedForumPersistence) {
+    let interval = Duration::from_secs(
+        std::env::var("PQPGP_FORUM_SYNC_INTERVAL")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(FORUM_SYNC_INTERVAL_SECS),
+    );
+
+    info!("Forum sync task started with {}s interval", interval.as_secs());
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        // Get list of locally-tracked forums
+        let forums = match persistence.list_forums() {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to list forums for sync: {}", e);
+                continue;
+            }
+        };
+
+        if forums.is_empty() {
+            continue;
+        }
+
+        info!("Syncing {} forum(s)...", forums.len());
+
+        for forum_hash in forums {
+            match forum_handlers::sync_forum(&persistence, &forum_hash).await {
+                Ok(count) => {
+                    if count > 0 {
+                        info!("Synced {} new node(s) for forum {}", count, forum_hash.short());
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to sync forum {}: {}", forum_hash.short(), e);
+                }
+            }
+        }
     }
 }
 
@@ -150,10 +210,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let chat_states = create_shared_state_manager();
     let relay_client = create_relay_client(relay_url);
 
+    // Initialize forum persistence using RocksDB
+    let forum_data_path = std::env::var("PQPGP_FORUM_DATA")
+        .unwrap_or_else(|_| "pqpgp_web_forum_data".to_string());
+    let forum_persistence = Arc::new(
+        WebForumPersistence::with_data_dir(&forum_data_path)
+            .expect("Failed to initialize forum persistence")
+    );
+    info!("Forum data stored in: {}", forum_data_path);
+
     let app_state = AppState {
         csrf_store,
         chat_states,
         relay_client,
+        forum_persistence: forum_persistence.clone(),
     };
 
     // Set up session management
@@ -192,9 +262,49 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .route("/chat/logout", post(logout_chat_identity))
         .route("/chat/fetch-messages", post(fetch_relay_messages))
         .route("/chat/users", get(list_relay_users))
+        // Forum routes
+        .route("/forum", get(forum_handlers::forum_list_page).post(forum_handlers::create_forum_handler))
+        .route("/forum/join", post(forum_handlers::join_forum_handler))
+        .route("/forum/:forum_hash", get(forum_handlers::forum_view_page))
+        .route("/forum/:forum_hash/board/create", post(forum_handlers::create_board_handler))
+        .route("/forum/:forum_hash/moderator/add", post(forum_handlers::add_moderator_handler))
+        .route("/forum/:forum_hash/moderator/remove", post(forum_handlers::remove_moderator_handler))
+        .route("/forum/:forum_hash/board/:board_hash", get(forum_handlers::board_view_page))
+        .route("/forum/:forum_hash/board/:board_hash/moderator/add", post(forum_handlers::add_board_moderator_handler))
+        .route("/forum/:forum_hash/board/:board_hash/moderator/remove", post(forum_handlers::remove_board_moderator_handler))
+        .route("/forum/:forum_hash/board/:board_hash/thread/create", post(forum_handlers::create_thread_handler))
+        .route("/forum/:forum_hash/thread/:thread_hash", get(forum_handlers::thread_view_page))
+        .route("/forum/:forum_hash/thread/:thread_hash/reply", post(forum_handlers::post_reply_handler))
+        .route("/forum/:forum_hash/thread/:thread_hash/hide", post(forum_handlers::hide_thread_handler))
+        .route("/forum/:forum_hash/thread/:thread_hash/hide_post", post(forum_handlers::hide_post_handler))
+        .route("/forum/:forum_hash/edit", post(forum_handlers::edit_forum_handler))
+        .route("/forum/:forum_hash/remove", post(forum_handlers::remove_forum_handler))
+        .route("/forum/:forum_hash/board/:board_hash/edit", post(forum_handlers::edit_board_handler))
+        .route("/forum/:forum_hash/board/:board_hash/hide", post(forum_handlers::hide_board_handler))
+        .route("/forum/:forum_hash/board/:board_hash/unhide", post(forum_handlers::unhide_board_handler))
         .nest_service("/static", ServeDir::new("src/web/static"))
         .layer(session_layer)
+        // Security headers to prevent common attacks
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::X_XSS_PROTECTION,
+            HeaderValue::from_static("1; mode=block"),
+        ))
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
         .with_state(app_state);
+
+    // Spawn background forum sync task
+    tokio::spawn(forum_sync_task(forum_persistence));
 
     let listener = TcpListener::bind("127.0.0.1:3000").await.unwrap();
     info!("🚀 PQPGP Web Interface running on http://127.0.0.1:3000");
@@ -258,8 +368,13 @@ async fn list_keys(
                 false
             };
 
+            // Compute fingerprint (first 16 hex chars of SHA3-512 hash)
+            let fp = entry.public_key.fingerprint();
+            let fingerprint = hex::encode(&fp[..8]);
+
             KeyInfo {
                 key_id: format!("{:016X}", key_id),
+                fingerprint,
                 algorithm: entry.public_key.algorithm().to_string(),
                 user_ids: entry.user_ids.clone(),
                 has_private_key: has_private,
@@ -606,8 +721,13 @@ async fn import_public_key(
                         false
                     };
 
+                    // Compute fingerprint (first 16 hex chars of SHA3-512 hash)
+                    let fp = entry.public_key.fingerprint();
+                    let fingerprint = hex::encode(&fp[..8]);
+
                     KeyInfo {
                         key_id: format!("{:016X}", key_id),
+                        fingerprint,
                         algorithm: entry.public_key.algorithm().to_string(),
                         user_ids: entry.user_ids.clone(),
                         has_private_key: has_private,
@@ -802,9 +922,13 @@ async fn encrypt_page(
         .filter(|(_, entry, has_private)| {
             *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
         })
-        .map(|(key_id, entry, _)| SigningKeyInfo {
-            key_id: format!("{:016X}", key_id),
-            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        .map(|(key_id, entry, _)| {
+            let fingerprint = entry.public_key.fingerprint();
+            SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                fingerprint: hex::encode(&fingerprint[..8]),
+            }
         })
         .collect();
 
@@ -866,9 +990,13 @@ async fn encrypt_handler(
             .filter(|(_, entry, has_private)| {
                 *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
             })
-            .map(|(key_id, entry, _)| SigningKeyInfo {
-                key_id: format!("{:016X}", key_id),
-                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+            .map(|(key_id, entry, _)| {
+                let fingerprint = entry.public_key.fingerprint();
+                SigningKeyInfo {
+                    key_id: format!("{:016X}", key_id),
+                    user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                    fingerprint: hex::encode(&fingerprint[..8]),
+                }
             })
             .collect();
 
@@ -1182,9 +1310,13 @@ async fn encrypt_handler(
         .filter(|(_, entry, has_private)| {
             *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
         })
-        .map(|(key_id, entry, _)| SigningKeyInfo {
-            key_id: format!("{:016X}", key_id),
-            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        .map(|(key_id, entry, _)| {
+            let fingerprint = entry.public_key.fingerprint();
+            SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                fingerprint: hex::encode(&fingerprint[..8]),
+            }
         })
         .collect();
 
@@ -1496,9 +1628,13 @@ async fn sign_page(
         .filter(|(_, entry, has_private)| {
             *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
         })
-        .map(|(key_id, entry, _)| SigningKeyInfo {
-            key_id: format!("{:016X}", key_id),
-            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        .map(|(key_id, entry, _)| {
+            let fingerprint = entry.public_key.fingerprint();
+            SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                fingerprint: hex::encode(&fingerprint[..8]),
+            }
         })
         .collect();
 
@@ -1546,9 +1682,13 @@ async fn sign_handler(
             .filter(|(_, entry, has_private)| {
                 *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
             })
-            .map(|(key_id, entry, _)| SigningKeyInfo {
-                key_id: format!("{:016X}", key_id),
-                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+            .map(|(key_id, entry, _)| {
+                let fingerprint = entry.public_key.fingerprint();
+                SigningKeyInfo {
+                    key_id: format!("{:016X}", key_id),
+                    user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                    fingerprint: hex::encode(&fingerprint[..8]),
+                }
             })
             .collect();
 
@@ -1716,9 +1856,13 @@ async fn sign_handler(
         .filter(|(_, entry, has_private)| {
             *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
         })
-        .map(|(key_id, entry, _)| SigningKeyInfo {
-            key_id: format!("{:016X}", key_id),
-            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        .map(|(key_id, entry, _)| {
+            let fingerprint = entry.public_key.fingerprint();
+            SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                fingerprint: hex::encode(&fingerprint[..8]),
+            }
         })
         .collect();
 
@@ -1966,9 +2110,13 @@ async fn files_page(
         .filter(|(_, entry, has_private)| {
             *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
         })
-        .map(|(key_id, entry, _)| SigningKeyInfo {
-            key_id: format!("{:016X}", key_id),
-            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        .map(|(key_id, entry, _)| {
+            let fingerprint = entry.public_key.fingerprint();
+            SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                fingerprint: hex::encode(&fingerprint[..8]),
+            }
         })
         .collect();
 
@@ -2265,9 +2413,13 @@ async fn decrypt_file_handler(
                 .filter(|(_, entry, has_private)| {
                     *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
                 })
-                .map(|(key_id, entry, _)| SigningKeyInfo {
-                    key_id: format!("{:016X}", key_id),
-                    user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                .map(|(key_id, entry, _)| {
+                    let fingerprint = entry.public_key.fingerprint();
+                    SigningKeyInfo {
+                        key_id: format!("{:016X}", key_id),
+                        user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                        fingerprint: hex::encode(&fingerprint[..8]),
+                    }
                 })
                 .collect();
 
@@ -2635,9 +2787,13 @@ async fn decrypt_file_handler(
         .filter(|(_, entry, has_private)| {
             *has_private && entry.public_key.algorithm() == Algorithm::Mldsa87
         })
-        .map(|(key_id, entry, _)| SigningKeyInfo {
-            key_id: format!("{:016X}", key_id),
-            user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+        .map(|(key_id, entry, _)| {
+            let fingerprint = entry.public_key.fingerprint();
+            SigningKeyInfo {
+                key_id: format!("{:016X}", key_id),
+                user_id: entry.user_ids.first().cloned().unwrap_or_default(),
+                fingerprint: hex::encode(&fingerprint[..8]),
+            }
         })
         .collect();
 

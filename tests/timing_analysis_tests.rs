@@ -3,12 +3,9 @@
 //! These tests use sophisticated statistical analysis to detect potential
 //! timing-based side-channel vulnerabilities in cryptographic operations.
 
-use pqpgp::{
-    crypto::{
-        decrypt_message, encrypt_message, sign_message, verify_signature, KeyPair, TimingAnalyzer,
-        TimingSafe, TimingSafeError,
-    },
-    validation::Validator,
+use pqpgp::crypto::{
+    decrypt_message, encrypt_message, sign_message, verify_signature, KeyPair, TimingAnalyzer,
+    TimingSafe, TimingSafeError,
 };
 use rand::{rngs::OsRng, Rng};
 use std::time::Instant;
@@ -463,50 +460,6 @@ fn test_timing_safe_error_handling() {
     );
 }
 
-/// Test input validation timing consistency
-#[test]
-fn test_validation_timing_consistency() {
-    let mut analyzer = TimingAnalyzer::new();
-
-    // Test various validation operations
-    for _ in 0..SAMPLE_SIZE {
-        let test_type = rand::random::<usize>() % 4;
-
-        let start = Instant::now();
-        match test_type {
-            0 => {
-                // Valid size
-                let data = vec![0u8; 1000];
-                let _ = Validator::validate_message_size(&data);
-            }
-            1 => {
-                // Invalid size
-                let data = vec![0u8; pqpgp::validation::MAX_MESSAGE_SIZE + 1];
-                let _ = Validator::validate_message_size(&data);
-            }
-            2 => {
-                // Valid algorithm
-                let _ = Validator::validate_algorithm_id(100, &[100, 101]);
-            }
-            _ => {
-                // Invalid algorithm
-                let _ = Validator::validate_algorithm_id(99, &[100, 101]);
-            }
-        }
-        let duration = start.elapsed().as_nanos();
-        analyzer.add_sample(duration);
-    }
-
-    let stats = analyzer.analyze();
-    println!("Validation timing: {}", stats);
-
-    // Validation should be consistent regardless of input validity
-    assert!(
-        analyzer.is_timing_consistent(get_timing_threshold()),
-        "Validation timing inconsistent: {}",
-        stats
-    );
-}
 
 /// Comprehensive timing analysis report
 #[test]

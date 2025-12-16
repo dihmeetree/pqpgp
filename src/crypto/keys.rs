@@ -169,6 +169,43 @@ impl PublicKey {
         Mldsa87PublicKey::from_bytes(&self.key_bytes)
             .map_err(|_| PqpgpError::key("Failed to reconstruct ML-DSA-87 public key from bytes"))
     }
+
+    /// Reconstructs a ML-DSA-87 public key from raw bytes with a known key ID.
+    ///
+    /// This is used for reconstructing public keys from stored identity bytes
+    /// in the forum DAG system.
+    ///
+    /// # Arguments
+    /// * `bytes` - The raw ML-DSA-87 public key bytes (2592 bytes)
+    /// * `key_id` - The key ID (usually from the signature)
+    ///
+    /// # Errors
+    /// Returns an error if the bytes are invalid or wrong length.
+    pub fn from_mldsa87_bytes_with_id(bytes: &[u8], key_id: u64) -> Result<Self> {
+        let mldsa_key = Mldsa87PublicKey::from_bytes(bytes)
+            .map_err(|_| PqpgpError::key("Invalid ML-DSA-87 public key bytes"))?;
+
+        Ok(Self::new_mldsa87(mldsa_key, key_id, KeyUsage::sign_only()))
+    }
+
+    /// Computes a fingerprint from raw ML-DSA-87 identity bytes.
+    ///
+    /// This is useful when you have raw public key bytes (e.g., from forum identities)
+    /// and need to compute their fingerprint without reconstructing the full PublicKey.
+    ///
+    /// The fingerprint is computed as: SHA3-512(algorithm_byte || key_bytes)
+    ///
+    /// # Arguments
+    /// * `identity_bytes` - Raw ML-DSA-87 public key bytes
+    ///
+    /// # Returns
+    /// The 64-byte fingerprint
+    pub fn fingerprint_from_mldsa87_bytes(identity_bytes: &[u8]) -> [u8; 64] {
+        let mut data = Vec::with_capacity(1 + identity_bytes.len());
+        data.extend_from_slice(&(Algorithm::Mldsa87 as u8).to_be_bytes());
+        data.extend_from_slice(identity_bytes);
+        hash_data(&data)
+    }
 }
 
 impl PrivateKey {

@@ -245,7 +245,7 @@ impl Session {
     /// let bob_bundle = bob_prekeys.create_bundle(&bob_identity, true);
     ///
     /// // Alice initiates a session with Bob
-    /// let alice_session = Session::initiate(&alice_identity, &bob_bundle)?;
+    /// let mut alice_session = Session::initiate(&alice_identity, &bob_bundle)?;
     ///
     /// // Alice can now send messages
     /// let encrypted = alice_session.encrypt(b"Hello Bob!")?;

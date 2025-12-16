@@ -58,7 +58,6 @@ pub const MAX_SKIP: u32 = 1000;
 /// A root key used in the KEM ratchet.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct RootKey {
-    #[zeroize(skip)]
     key: [u8; ROOT_KEY_SIZE],
 }
 
@@ -85,9 +84,7 @@ impl RootKey {
 /// A chain key used in the symmetric ratchet.
 #[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct ChainKey {
-    #[zeroize(skip)]
     key: [u8; CHAIN_KEY_SIZE],
-    #[zeroize(skip)]
     index: u32,
 }
 
@@ -145,7 +142,6 @@ impl ChainKey {
 /// A message key used to encrypt/decrypt a single message.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct MessageKey {
-    #[zeroize(skip)]
     key: [u8; MESSAGE_KEY_SIZE],
 }
 
@@ -230,7 +226,6 @@ impl RatchetPublicKey {
 /// A KEM private key used in the ratchet.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct RatchetPrivateKey {
-    #[zeroize(skip)]
     key_bytes: Vec<u8>,
 }
 

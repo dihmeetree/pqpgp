@@ -58,10 +58,8 @@ pub const ROOT_KEY_SIZE: usize = 32;
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct X3DHSharedSecret {
     /// The derived root key
-    #[zeroize(skip)]
     root_key: [u8; ROOT_KEY_SIZE],
     /// Associated data binding the key to both identities
-    #[zeroize(skip)]
     associated_data: Vec<u8>,
 }
 
@@ -275,9 +273,11 @@ impl X3DHReceiver {
     /// # let (_, their_keys) = pqpgp::chat::X3DHSender::perform(&alice_identity, &bob_bundle)?;
     ///
     /// // Look up the prekeys that were used
-    /// let signed_prekey = generator.signed_prekey_private();
+    /// // Consume one-time prekey first (requires mutable access)
     /// let one_time_prekey = their_keys.one_time_prekey_id
     ///     .and_then(|id| generator.consume_one_time_prekey(id));
+    /// // Then get signed prekey (immutable access)
+    /// let signed_prekey = generator.signed_prekey_private();
     ///
     /// let shared_secret = X3DHReceiver::perform(
     ///     &bob_identity,
@@ -285,7 +285,7 @@ impl X3DHReceiver {
     ///     one_time_prekey.as_ref(),
     ///     &their_keys,
     /// )?;
-    /// # Ok::<(), pqpgpError>(())
+    /// # Ok::<(), pqpgp::error::PqpgpError>(())
     /// ```
     pub fn perform(
         our_identity: &IdentityKeyPair,

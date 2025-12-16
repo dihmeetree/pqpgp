@@ -164,13 +164,10 @@ impl IdentityKey {
 #[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct IdentityPrivateKey {
     /// The ML-DSA-87 secret key bytes (zeroized on drop)
-    #[zeroize(skip)] // Vec has its own zeroize, but we handle via Drop
     key_bytes: Vec<u8>,
     /// Associated key ID (matches the public key)
-    #[zeroize(skip)]
     key_id: u64,
     /// Whether the key is encrypted
-    #[zeroize(skip)]
     encrypted: bool,
 }
 

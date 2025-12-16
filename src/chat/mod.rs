@@ -35,31 +35,22 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! use pqpgp::chat::{Identity, PreKeyBundle, Session};
+//! use pqpgp::chat::{IdentityKeyPair, Session};
+//! use pqpgp::chat::prekey::PreKeyGenerator;
 //!
 //! // Generate identities
-//! let alice_identity = Identity::generate()?;
-//! let bob_identity = Identity::generate()?;
+//! let alice_identity = IdentityKeyPair::generate()?;
+//! let bob_identity = IdentityKeyPair::generate()?;
 //!
 //! // Bob creates and publishes his prekey bundle
-//! let bob_bundle = PreKeyBundle::generate(&bob_identity, 100)?;
+//! let bob_prekeys = PreKeyGenerator::new(&bob_identity, 10)?;
+//! let bob_bundle = bob_prekeys.create_bundle(&bob_identity, true);
 //!
 //! // Alice initiates a session with Bob
-//! let (mut alice_session, initial_message) = Session::initiate(
-//!     &alice_identity,
-//!     &bob_bundle,
-//!     b"Hello Bob!",
-//! )?;
+//! let mut alice_session = Session::initiate(&alice_identity, &bob_bundle)?;
 //!
-//! // Bob receives and establishes his session
-//! let mut bob_session = Session::receive(
-//!     &bob_identity,
-//!     &initial_message,
-//! )?;
-//!
-//! // Now they can exchange messages
-//! let encrypted = alice_session.encrypt(b"How are you?")?;
-//! let decrypted = bob_session.decrypt(&encrypted)?;
+//! // Alice can now send messages using the double ratchet
+//! let encrypted = alice_session.encrypt(b"Hello Bob!")?;
 //! # Ok::<(), pqpgp::error::PqpgpError>(())
 //! ```
 

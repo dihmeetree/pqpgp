@@ -1,16 +1,6 @@
-```bash
- /$$$$$$$   /$$$$$$  /$$$$$$$   /$$$$$$  /$$$$$$$
-| $$__  $$ /$$__  $$| $$__  $$ /$$__  $$| $$__  $$
-| $$  \ $$| $$  \ $$| $$  \ $$| $$  \__/| $$  \ $$
-| $$$$$$$/| $$  | $$| $$$$$$$/| $$ /$$$$| $$$$$$$/
-| $$____/ | $$  | $$| $$____/ | $$|_  $$| $$____/
-| $$      | $$/$$ $$| $$      | $$  \ $$| $$
-| $$      |  $$$$$$/| $$      |  $$$$$$/| $$
-|__/       \____ $$$|__/       \______/ |__/
-                \__/
-```
-
-# Post-Quantum Pretty Good Privacy
+<p align="center">
+  <img src="https://i.imgur.com/WEuYD72.png" alt="PQPGP" width="850">
+</p>
 
 A post-quantum secure implementation of PGP (Pretty Good Privacy) in Rust, providing quantum-resistant cryptographic operations while maintaining compatibility with standard PGP workflows and packet formats.
 
@@ -127,8 +117,11 @@ cargo build --release --workspace
 - Decrypt-then-verify workflow with signed message parsing
 - Key import/export functionality
 - **Post-quantum encrypted chat** with Signal Protocol-inspired design
+- **DAG-based forums** with cryptographic integrity and hierarchical moderation
 - User-friendly forms with CSRF protection
-- Session-based security for web operations
+- Session-based security with HTTP-only cookies
+- **Security headers**: X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy
+- Input validation with size limits to prevent DoS attacks
 
 ### Message Relay Server
 
@@ -152,6 +145,98 @@ PQPGP_RELAY_URL=http://your-relay:8080 ./target/release/pqpgp-web
 - User discovery endpoint
 - Stateless design (messages deleted after delivery)
 - Cryptographically random message IDs
+- **Forum hosting** with RocksDB-backed persistence
+- **IP-based rate limiting** with token bucket algorithm (separate limits for reads/writes)
+- **Graceful error recovery** for lock poisoning
+
+### DAG-Based Forums
+
+PQPGP includes a cryptographically-secured forum system built on a Directed Acyclic Graph (DAG) structure:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                       DAG STRUCTURE                          │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│   ForumGenesis ──┬──> BoardGenesis ──┬──> ThreadRoot        │
+│   (root)         │    (board A)      │    (thread 1)        │
+│                  │                   │         │            │
+│                  │                   │    ┌────┴────┐       │
+│                  │                   │    ▼         ▼       │
+│                  │                   │  Post      Post      │
+│                  │                   │    │                 │
+│                  │                   │    ▼                 │
+│                  │                   │  Post (reply)        │
+│                  │                   │                      │
+│                  └──> BoardGenesis ──┴──> ...               │
+│                       (board B)                             │
+│                                                              │
+│   Each node:                                                 │
+│   • content_hash = SHA3-512(bincode::serialize(content))    │
+│   • signature = ML-DSA-87(content, author_private_key)      │
+│   • References parent(s) by content_hash                    │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Forum Features:**
+
+- **Content Addressing**: Every node is identified by its SHA3-512 hash
+- **Cryptographic Signatures**: All posts signed with ML-DSA-87 for authenticity
+- **Hierarchical Structure**: Forum → Board → Thread → Post
+- **Moderation System**: Forum owners, forum moderators, and board-specific moderators
+- **Self-Describing Data**: DAG can be rebuilt from any backup without external data
+- **Sync Protocol**: Efficient head-based synchronization between clients and relay
+- **Client-Side Storage**: Web client maintains local DAG copy for offline access
+- **Causal Ordering**: Moderation actions reference DAG heads to prevent race conditions
+- **RocksDB Storage**: High-performance relay persistence that scales to millions of posts
+
+**Moderation Hierarchy:**
+
+| Role | Permissions |
+|------|-------------|
+| **Forum Owner** | Create boards, add/remove forum moderators, edit forum, full control |
+| **Forum Moderator** | Create boards, add/remove board moderators, hide/unhide boards, edit boards |
+| **Board Moderator** | Hide/unhide threads and posts within assigned board only |
+| **Member** | Create threads and posts |
+
+**Moderation Actions:**
+
+- `AddModerator` / `RemoveModerator` - Forum-level moderator management (owner only)
+- `AddBoardModerator` / `RemoveBoardModerator` - Board-level moderator management
+- `HideThread` / `UnhideThread` - Hide or restore threads (content remains in DAG)
+- `HidePost` / `UnhidePost` - Hide or restore individual posts
+- `HideBoard` / `UnhideBoard` - Hide or restore entire boards
+
+**DAG Sync Protocol:**
+
+The sync protocol uses **heads** (nodes with no children) to efficiently determine what data needs to be transferred:
+
+```
+1. Client → Relay:  SyncRequest { forum_hash, known_heads: [...] }
+2. Relay → Client:  SyncResponse { missing_hashes: [...], server_heads: [...] }
+3. Client → Relay:  FetchNodesRequest { hashes: [...] }
+4. Relay → Client:  FetchNodesResponse { nodes: [...] }
+5. Client stores nodes and updates local heads
+```
+
+This approach minimizes bandwidth by only transferring nodes the client doesn't have. Concurrent posts from different users create valid DAG branches that merge on sync.
+
+**Forum API Endpoints:**
+
+```
+GET    /forums                    - List all forums
+POST   /forums                    - Create a new forum
+GET    /forums/:hash              - Get forum details
+GET    /forums/:hash/boards       - List boards in forum
+GET    /forums/:hash/moderators   - List forum moderators
+GET    /forums/:fh/boards/:bh/moderators - List board moderators
+GET    /forums/:fh/boards/:bh/threads    - List threads in board
+GET    /forums/:fh/threads/:th/posts     - List posts in thread
+POST   /forums/sync               - Sync request (get missing hashes)
+POST   /forums/nodes/fetch        - Fetch nodes by hash
+POST   /forums/nodes/submit       - Submit a new node
+GET    /forums/:hash/export       - Export entire forum DAG
+```
 
 ## 🔑 Password Protection
 
@@ -292,7 +377,7 @@ let ciphertext = aes_gcm.encrypt(nonce, Payload { msg, aad })?;
 
 ## 🛡️ Security Testing
 
-PQPGP includes a comprehensive security testing framework with **123 tests** covering:
+PQPGP includes a comprehensive security testing framework with **330+ tests** covering:
 
 - **Input Validation**: Buffer overflow protection, bounds checking
 - **Attack Resistance**: Timing attacks, padding oracles, injection attacks
@@ -328,6 +413,20 @@ src/
 ├── validation/       # Security validation and rate limiting
 ├── keyring/          # Key storage and management
 ├── armor/            # ASCII armor encoding/decoding + signed message parsing
+├── forum/            # DAG-based forum system
+│   ├── types.rs      # ContentHash, NodeType, ModAction
+│   ├── genesis.rs    # ForumGenesis node
+│   ├── board.rs      # BoardGenesis node
+│   ├── thread.rs     # ThreadRoot node
+│   ├── post.rs       # Post node
+│   ├── edit.rs       # EditNode for forum/board metadata updates
+│   ├── moderation.rs # ModActionNode for moderator management
+│   ├── permissions.rs# Permission checking and moderator resolution
+│   ├── dag.rs        # DagNode enum wrapper
+│   ├── sync.rs       # Sync protocol types (SyncRequest, FetchNodes, etc.)
+│   ├── storage.rs    # Client-side file-based DAG storage
+│   ├── client.rs     # ForumClient with sync orchestration
+│   └── validation.rs # Node validation rules
 └── cli/              # Command-line interface
 ```
 
@@ -335,44 +434,113 @@ src/
 
 ```
 bin/web/
-├── Cargo.toml        # Web-specific dependencies (axum, askama, reqwest)
+├── Cargo.toml        # Web-specific dependencies (axum, askama, reqwest, rocksdb)
 └── src/
-    ├── main.rs       # Web server, HTTP handlers, chat endpoints
+    ├── main.rs       # Web server, HTTP handlers, chat endpoints, background sync task
     ├── chat_state.rs # Chat session state management
     ├── relay_client.rs # HTTP client for relay server
-    ├── storage.rs    # Encrypted persistent storage
+    ├── storage.rs    # Encrypted persistent storage for chat
     ├── csrf.rs       # CSRF protection
-    └── templates/    # HTML templates
+    ├── forum_handlers.rs  # Forum web handlers with sync and validation logic
+    ├── forum_persistence.rs # RocksDB-backed local forum storage
+    ├── templates.rs  # Askama template definitions
+    └── templates/    # HTML templates (forum, chat, keys, etc.)
 ```
+
+**Web Client Forum Storage (RocksDB):**
+
+```
+pqpgp_web_forum_data/
+└── forum_db/                    # RocksDB database
+    ├── Column: nodes            # {forum_hash}:{node_hash} → DagNode
+    ├── Column: forums           # {forum_hash} → ForumMetadata
+    ├── Column: heads            # {forum_hash} → Vec<ContentHash>
+    └── Column: meta             # forum_list → [forum_hashes]
+```
+
+**Background Sync:**
+
+The web client uses background polling to keep forums synchronized:
+
+- Default sync interval: 30 seconds (configurable via `PQPGP_FORUM_SYNC_INTERVAL`)
+- All locally-tracked forums are synced automatically
+- UI reads from local storage for fast, offline-capable access
+- New content is stored locally first, then submitted to relay
+
+**Node Validation:**
+
+Both the relay server and web client validate nodes using shared validation logic:
+
+- Signature verification (ML-DSA-87)
+- Content hash verification (SHA3-512)
+- Parent existence checks (DAG integrity)
+- Parent type validation (posts can only reference posts or thread roots)
+- Thread isolation (parent posts must belong to the same thread)
+- Permission checks (moderator actions)
+- Target validation (hide/unhide actions verify target exists and has correct type)
+- Timestamp sanity checks (±5 minute clock skew, minimum timestamp validation)
+- Content size limits (DoS prevention)
+
+Invalid nodes are rejected and not stored, protecting against malicious relays.
 
 ### Relay Server (bin/relay)
 
 ```
 bin/relay/
-├── Cargo.toml        # Relay server dependencies
+├── Cargo.toml           # Relay server dependencies (axum, rocksdb)
 └── src/
-    └── main.rs       # Message relay server
-        # Endpoints:
-        # POST   /register         - Register user with prekey bundle
-        # DELETE /register/:fp     - Unregister user
-        # GET    /users            - List registered users
-        # GET    /users/:fp        - Get user's prekey bundle
-        # POST   /messages/:fp     - Send message to recipient
-        # GET    /messages/:fp     - Fetch pending messages
-        # GET    /health           - Health check
-        # GET    /stats            - Server statistics
+    ├── main.rs          # Message relay server + forum router
+    ├── forum_handlers.rs # Forum API handlers with validation
+    ├── forum_state.rs   # Forum DAG state management
+    ├── forum_persistence.rs # RocksDB-backed persistence
+    └── rate_limit.rs    # IP-based rate limiting middleware
+
+# Messaging Endpoints:
+# POST   /register         - Register user with prekey bundle
+# DELETE /register/:fp     - Unregister user
+# GET    /users            - List registered users
+# GET    /users/:fp        - Get user's prekey bundle
+# POST   /messages/:fp     - Send message to recipient
+# GET    /messages/:fp     - Fetch pending messages
+# GET    /health           - Health check
+# GET    /stats            - Server statistics
+#
+# Forum Endpoints:
+# GET/POST /forums         - List/Create forums
+# GET    /forums/:hash     - Get forum details
+# GET    /forums/:hash/boards - List boards
+# GET    /forums/:hash/moderators - List moderators
+# POST   /forums/sync      - Sync protocol
+# POST   /forums/nodes/*   - Node operations
 ```
+
+**Forum Storage Layout (RocksDB):**
+
+```
+pqpgp_relay_data/
+└── forum_db/                    # RocksDB database
+    ├── Column: nodes            # {forum_hash}:{node_hash} → DagNode
+    ├── Column: forums           # {forum_hash} → metadata
+    └── Column: meta             # forum_list → [forum_hashes]
+```
+
+- **Write-optimized**: LSM tree with 64MB write buffers for fast appends
+- **Compressed**: LZ4 compression reduces storage by ~60%
+- **Scalable**: Handles millions of nodes with O(1) writes
+- **Crash-safe**: WAL ensures durability even on power failure
 
 ### Testing & Examples
 
 ```
 examples/             # Usage examples and demonstrations
 tests/                # Comprehensive test suite
-├── security_tests.rs # Security validation tests
-├── adversarial_tests.rs # Attack simulation tests
-├── fuzz_tests.rs     # Fuzzing and property-based tests
-├── property_tests.rs # Mathematical property verification
-└── integration_tests.rs # End-to-end workflow tests
+├── security_tests.rs      # Security validation tests
+├── adversarial_tests.rs   # Attack simulation tests
+├── fuzz_tests.rs          # Fuzzing and property-based tests
+├── property_tests.rs      # Mathematical property verification
+├── integration_tests.rs   # End-to-end workflow tests
+├── timing_analysis_tests.rs      # Timing side-channel analysis
+└── timing_safe_crypto_tests.rs   # Constant-time operation verification
 ```
 
 ## 🔧 Development

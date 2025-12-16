@@ -6,6 +6,7 @@ use askama::Template;
 #[derive(Debug)]
 pub struct KeyInfo {
     pub key_id: String,
+    pub fingerprint: String,
     pub algorithm: String,
     pub user_ids: Vec<String>,
     pub has_private_key: bool,
@@ -24,6 +25,8 @@ pub struct RecipientInfo {
 pub struct SigningKeyInfo {
     pub key_id: String,
     pub user_id: String,
+    /// Public key fingerprint (first 16 hex chars of SHA3-512 hash)
+    pub fingerprint: String,
 }
 
 /// Index page template
@@ -158,6 +161,141 @@ pub struct ChatTemplate {
     pub our_identity: Option<String>,
     pub our_prekey_bundle: Option<String>,
     pub saved_identities: Vec<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub has_result: bool,
+    pub has_error: bool,
+}
+
+// ============================================================================
+// Forum Templates
+// ============================================================================
+
+/// Forum info for display
+#[derive(Debug, Clone)]
+pub struct ForumDisplayInfo {
+    pub hash: String,
+    pub name: String,
+    pub description: String,
+    pub node_count: usize,
+    pub created_at_display: String,
+}
+
+/// Board info for display
+#[derive(Debug, Clone)]
+pub struct BoardDisplayInfo {
+    pub hash: String,
+    pub name: String,
+    pub description: String,
+    pub tags: Vec<String>,
+    pub created_at_display: String,
+}
+
+/// Thread info for display
+#[derive(Debug, Clone)]
+pub struct ThreadDisplayInfo {
+    pub hash: String,
+    pub title: String,
+    pub body_preview: String,
+    pub author_short: String,
+    pub post_count: usize,
+    pub created_at_display: String,
+}
+
+/// Post info for display
+#[derive(Debug, Clone)]
+pub struct PostDisplayInfo {
+    pub hash: String,
+    pub body: String,
+    pub author_short: String,
+    pub quote_body: Option<String>,
+    pub created_at_display: String,
+}
+
+/// Moderator info for display
+#[derive(Debug, Clone)]
+pub struct ModeratorDisplayInfo {
+    pub identity_fingerprint: String,
+    pub is_owner: bool,
+}
+
+/// Forum listing template
+#[derive(Template)]
+#[template(path = "forum.html")]
+pub struct ForumListTemplate {
+    pub active_page: String,
+    pub csrf_token: String,
+    pub forums: Vec<ForumDisplayInfo>,
+    pub signing_keys: Vec<SigningKeyInfo>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub has_result: bool,
+    pub has_error: bool,
+}
+
+/// Single forum view template
+#[derive(Template)]
+#[template(path = "forum_view.html")]
+pub struct ForumViewTemplate {
+    pub active_page: String,
+    pub csrf_token: String,
+    pub forum_hash: String,
+    pub forum_hash_short: String,
+    pub forum_name: String,
+    pub forum_description: String,
+    pub created_at_display: String,
+    pub boards: Vec<BoardDisplayInfo>,
+    pub signing_keys: Vec<SigningKeyInfo>,
+    pub moderators: Vec<ModeratorDisplayInfo>,
+    pub is_owner: bool,
+    pub is_moderator: bool,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub has_result: bool,
+    pub has_error: bool,
+}
+
+/// Board view template
+#[derive(Template)]
+#[template(path = "board_view.html")]
+pub struct BoardViewTemplate {
+    pub active_page: String,
+    pub csrf_token: String,
+    pub forum_hash: String,
+    pub forum_name: String,
+    pub board_hash: String,
+    pub board_name: String,
+    pub board_description: String,
+    pub board_tags: Vec<String>,
+    pub threads: Vec<ThreadDisplayInfo>,
+    pub signing_keys: Vec<SigningKeyInfo>,
+    pub board_moderators: Vec<ModeratorDisplayInfo>,
+    pub is_forum_moderator: bool,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub has_result: bool,
+    pub has_error: bool,
+}
+
+/// Thread view template
+#[derive(Template)]
+#[template(path = "thread_view.html")]
+pub struct ThreadViewTemplate {
+    pub active_page: String,
+    pub csrf_token: String,
+    pub forum_hash: String,
+    pub forum_name: String,
+    pub board_hash: String,
+    pub board_name: String,
+    pub thread_hash: String,
+    pub thread_title: String,
+    pub thread_body: String,
+    pub thread_author_short: String,
+    pub thread_created_at_display: String,
+    pub posts: Vec<PostDisplayInfo>,
+    pub signing_keys: Vec<SigningKeyInfo>,
+    /// Whether the current user is a moderator (can hide/unhide content).
+    pub is_moderator: bool,
     pub result: Option<String>,
     pub error: Option<String>,
     pub has_result: bool,

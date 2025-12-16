@@ -129,10 +129,8 @@ impl SignedPreKey {
 #[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct SignedPreKeyPrivate {
     /// Prekey ID (matches public)
-    #[zeroize(skip)]
     id: PreKeyId,
     /// The ML-KEM-1024 secret key bytes
-    #[zeroize(skip)]
     secret_key: Vec<u8>,
 }
 
@@ -211,10 +209,8 @@ impl OneTimePreKey {
 #[derive(Clone, Serialize, Deserialize, ZeroizeOnDrop)]
 pub struct OneTimePreKeyPrivate {
     /// Prekey ID (matches public)
-    #[zeroize(skip)]
     id: PreKeyId,
     /// The ML-KEM-1024 secret key bytes
-    #[zeroize(skip)]
     secret_key: Vec<u8>,
 }
 
@@ -367,7 +363,8 @@ impl PreKeyGenerator {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use pqpgp::chat::{IdentityKeyPair, PreKeyGenerator};
+    /// use pqpgp::chat::IdentityKeyPair;
+    /// use pqpgp::chat::prekey::PreKeyGenerator;
     ///
     /// let identity = IdentityKeyPair::generate()?;
     /// let generator = PreKeyGenerator::new(&identity, 100)?;

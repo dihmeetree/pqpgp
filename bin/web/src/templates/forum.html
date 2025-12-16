@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}Forums - PQPGP{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Public Forums</h2>
+    <p>Cryptographically signed public discussions with post-quantum security.</p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if forums.is_empty() %}
+    <p style="color: #718096; font-style: italic;">No forums available. Create one below!</p>
+    {% else %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Forum Name</th>
+                <th>Description</th>
+                <th>Nodes</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for forum in forums %}
+            <tr>
+                <td><strong>{{ forum.name }}</strong></td>
+                <td>{{ forum.description }}</td>
+                <td>{{ forum.node_count }}</td>
+                <td>{{ forum.created_at_display }}</td>
+                <td>
+                    <a href="/forum/{{ forum.hash }}" class="btn btn-small">View Boards</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+<div class="card">
+    <h2>Join Forum by Hash</h2>
+    <p style="color: #718096;">Enter a forum hash to sync and join an existing forum from the relay.</p>
+    <form method="post" action="/forum/join">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="join_forum_hash">Forum Hash</label>
+            <input type="text" id="join_forum_hash" name="forum_hash" required
+                   placeholder="Enter forum hash (hex string)"
+                   pattern="[a-fA-F0-9]+"
+                   title="Forum hash should be a hexadecimal string">
+        </div>
+
+        <button type="submit" class="btn">Join Forum</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Create New Forum</h2>
+    <form method="post" action="/forum">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="forum_name">Forum Name</label>
+            <input type="text" id="forum_name" name="name" required maxlength="100"
+                   placeholder="My Forum">
+        </div>
+
+        <div class="form-group">
+            <label for="forum_description">Description</label>
+            <textarea id="forum_description" name="description" maxlength="10000"
+                      placeholder="What is this forum about?"></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="identity_key">Your Identity Key</label>
+            <select id="identity_key" name="signing_key" required>
+                <option value="">-- Select your signing key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+            <small style="color: #718096;">This key will be used to sign and own the forum.</small>
+        </div>
+
+        <div class="form-group">
+            <label for="key_password">Key Password (if protected)</label>
+            <input type="password" id="key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Create Forum</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>How Forums Work</h2>
+    <ul>
+        <li><strong>Cryptographic Integrity</strong> - Every post is signed with ML-DSA-87 (post-quantum secure)</li>
+        <li><strong>DAG Structure</strong> - Content forms a Directed Acyclic Graph that can be rebuilt from any backup</li>
+        <li><strong>Content Addressing</strong> - Each node is identified by its SHA3-512 hash</li>
+        <li><strong>Moderation</strong> - Forum owners can appoint moderators who can create boards</li>
+        <li><strong>Public</strong> - All content is public and readable by anyone</li>
+    </ul>
+</div>
+{% endblock %}

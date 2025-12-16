@@ -10,8 +10,14 @@ use std::time::{Duration, UNIX_EPOCH};
 
 /// Get the default keyring directory
 pub fn get_keyring_dir() -> Result<PathBuf> {
+    // Try HOME first (Unix/Mac), then USERPROFILE (Windows)
     let home = env::var("HOME")
-        .map_err(|_| crate::error::PqpgpError::keyring("HOME environment variable not set"))?;
+        .or_else(|_| env::var("USERPROFILE"))
+        .map_err(|_| {
+            crate::error::PqpgpError::keyring(
+                "Neither HOME nor USERPROFILE environment variable is set",
+            )
+        })?;
 
     let keyring_dir = Path::new(&home).join(".pqpgp");
 

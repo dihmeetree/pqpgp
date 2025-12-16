@@ -4,6 +4,9 @@
 //! This server stores prekey bundles for user discovery and queues encrypted messages
 //! for delivery to offline recipients.
 //!
+//! Also provides a DAG-based forum system for public discussions with cryptographic
+//! integrity guarantees.
+//!
 //! ## Usage
 //!
 //! ```bash
@@ -17,6 +20,11 @@
 //! RUST_LOG=debug pqpgp-relay
 //! ```
 
+mod forum_handlers;
+mod forum_persistence;
+mod forum_state;
+mod rate_limit;
+
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -24,11 +32,15 @@ use axum::{
     routing::{delete, get, post},
     Json, Router,
 };
+use std::net::SocketAddr;
+use forum_handlers::SharedForumState;
+use forum_persistence::PersistentForumState;
+use rate_limit::RateLimitLayer;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 use tokio::net::TcpListener;
-use tracing::{info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 use tracing_subscriber::EnvFilter;
 
 /// Maximum messages to queue per recipient (prevent memory exhaustion)
@@ -400,6 +412,13 @@ fn rand_id() -> String {
 // Main
 // ============================================================================
 
+/// Combined application state containing both messaging and forum state.
+#[derive(Clone)]
+pub struct AppState {
+    pub relay: SharedRelayState,
+    pub forum: SharedForumState,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize tracing
@@ -417,29 +436,101 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|_| std::env::args().nth(2))
         .unwrap_or_else(|| "127.0.0.1:3001".to_string());
 
-    // Initialize relay state
-    let state: SharedRelayState = Arc::new(RwLock::new(RelayState::new()));
+    // Initialize states
+    let relay_state: SharedRelayState = Arc::new(RwLock::new(RelayState::new()));
 
-    // Build router
-    let app = Router::new()
-        // Health and stats
-        .route("/health", get(health_check))
-        .route("/stats", get(stats))
-        // User management
+    // Load forum state from disk (or create fresh if no data exists)
+    let forum_state: SharedForumState = match PersistentForumState::new() {
+        Ok(persistent) => {
+            info!(
+                "Forum persistence initialized with {} forums, {} nodes",
+                persistent.forums().len(),
+                persistent.total_nodes()
+            );
+            Arc::new(RwLock::new(persistent))
+        }
+        Err(e) => {
+            error!("Failed to initialize forum persistence: {}", e);
+            error!("Starting with empty forum state");
+            Arc::new(RwLock::new(PersistentForumState::default()))
+        }
+    };
+
+    // Create rate limit layers
+    let read_rate_limit = RateLimitLayer::for_reads();
+    let write_rate_limit = RateLimitLayer::for_writes();
+
+    // Build messaging router with rate limiting
+    // Write operations get more restrictive rate limits
+    let messaging_write_router = Router::new()
         .route("/register", post(register_user))
         .route("/register/:fingerprint", delete(unregister_user))
+        .route("/messages/:fingerprint", post(send_message))
+        .with_state(relay_state.clone())
+        .layer(write_rate_limit.clone());
+
+    // Read operations get more permissive rate limits
+    let messaging_read_router = Router::new()
+        .route("/health", get(health_check))
+        .route("/stats", get(stats))
         .route("/users", get(list_users))
         .route("/users/:fingerprint", get(get_user))
-        // Messaging
-        .route("/messages/:fingerprint", post(send_message))
         .route("/messages/:fingerprint", get(fetch_messages))
         .route("/messages/:fingerprint/check", get(check_messages))
-        .with_state(state);
+        .with_state(relay_state)
+        .layer(read_rate_limit.clone());
+
+    let messaging_router = Router::new()
+        .merge(messaging_write_router)
+        .merge(messaging_read_router);
+
+    // Build forum router with rate limiting
+    // Write operations (create forum, sync, submit nodes)
+    let forum_write_router = Router::new()
+        .route("/", post(forum_handlers::create_forum))
+        .route("/sync", post(forum_handlers::sync_forum))
+        .route("/nodes/fetch", post(forum_handlers::fetch_nodes))
+        .route("/nodes/submit", post(forum_handlers::submit_node))
+        .with_state(forum_state.clone())
+        .layer(write_rate_limit);
+
+    // Read operations (list forums, get forum, export, etc.)
+    let forum_read_router = Router::new()
+        .route("/", get(forum_handlers::list_forums))
+        .route("/stats", get(forum_handlers::forum_stats))
+        .route("/:hash", get(forum_handlers::get_forum))
+        .route("/:hash/export", get(forum_handlers::export_forum))
+        .route("/:hash/boards", get(forum_handlers::list_boards))
+        .route("/:hash/moderators", get(forum_handlers::list_moderators))
+        .route(
+            "/:forum_hash/boards/:board_hash/moderators",
+            get(forum_handlers::list_board_moderators),
+        )
+        .route(
+            "/:forum_hash/boards/:board_hash/threads",
+            get(forum_handlers::list_threads),
+        )
+        .route(
+            "/:forum_hash/threads/:thread_hash/posts",
+            get(forum_handlers::list_posts),
+        )
+        .with_state(forum_state)
+        .layer(read_rate_limit);
+
+    let forum_router = Router::new()
+        .merge(forum_write_router)
+        .merge(forum_read_router);
+
+    // Combine routers
+    let app = Router::new()
+        .merge(messaging_router)
+        .nest("/forums", forum_router);
 
     // Start server
     let listener = TcpListener::bind(&bind_addr).await?;
     info!("PQPGP Relay Server running on http://{}", bind_addr);
-    info!("Endpoints:");
+    info!("");
+    info!("Messaging Endpoints:");
     info!("  POST   /register              - Register user with prekey bundle");
     info!("  DELETE /register/:fp          - Unregister user");
     info!("  GET    /users                 - List all registered users");
@@ -449,8 +540,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  GET    /messages/:fp/check    - Check pending message count");
     info!("  GET    /health                - Health check");
     info!("  GET    /stats                 - Server statistics");
+    info!("");
+    info!("Forum Endpoints:");
+    info!("  GET    /forums                - List all forums");
+    info!("  POST   /forums                - Create a new forum");
+    info!("  GET    /forums/stats          - Forum statistics");
+    info!("  POST   /forums/sync           - Sync request (get missing hashes)");
+    info!("  POST   /forums/nodes/fetch    - Fetch nodes by hash");
+    info!("  POST   /forums/nodes/submit   - Submit a new node");
+    info!("  GET    /forums/:hash          - Get forum details");
+    info!("  GET    /forums/:hash/export   - Export entire forum DAG");
+    info!("  GET    /forums/:hash/boards   - List boards in forum");
+    info!("  GET    /forums/:fh/boards/:bh/threads - List threads");
+    info!("  GET    /forums/:fh/threads/:th/posts  - List posts");
 
-    axum::serve(listener, app).await?;
+    // Use into_make_service_with_connect_info to make client IP available for rate limiting
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
 
     Ok(())
 }

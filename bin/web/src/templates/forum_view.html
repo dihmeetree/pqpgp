@@ -1,0 +1,250 @@
+{% extends "base.html" %}
+
+{% block title %}{{ forum_name }} - PQPGP Forums{% endblock %}
+
+{% block content %}
+<p><a href="/forum" class="btn">&larr; Back to Forums</a></p>
+
+<div class="card">
+    <h2>{{ forum_name }}</h2>
+    <p>{{ forum_description }}</p>
+    <p style="color: #718096; font-size: 0.9em;">
+        Forum ID: <span class="key-id">{{ forum_hash_short }}</span>
+        &nbsp;|&nbsp; Created: {{ created_at_display }}
+    </p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    <h3>Moderators</h3>
+    {% if moderators.is_empty() %}
+    <p style="color: #718096; font-style: italic;">No moderators assigned yet.</p>
+    {% else %}
+    <ul style="margin: 0.5em 0; padding-left: 1.5em;">
+        {% for mod in moderators %}
+        <li>
+            <span class="key-id">{{ mod.identity_fingerprint }}</span>
+            {% if mod.is_owner %}
+            <span class="status-badge status-success">Owner</span>
+            {% else %}
+            <span class="status-badge status-warning">Moderator</span>
+            {% endif %}
+        </li>
+        {% endfor %}
+    </ul>
+    {% endif %}
+
+    <h3>Boards</h3>
+    {% if boards.is_empty() %}
+    <p style="color: #718096; font-style: italic;">No boards yet. Moderators can create boards below.</p>
+    {% else %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Board Name</th>
+                <th>Description</th>
+                <th>Tags</th>
+                <th>Created</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for board in boards %}
+            <tr>
+                <td><strong>{{ board.name }}</strong></td>
+                <td>{{ board.description }}</td>
+                <td>
+                    {% for tag in board.tags %}
+                    <span class="status-badge status-success">{{ tag }}</span>
+                    {% endfor %}
+                </td>
+                <td>{{ board.created_at_display }}</td>
+                <td>
+                    <a href="/forum/{{ forum_hash }}/board/{{ board.hash }}" class="btn btn-small">View Board</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+{% if is_moderator %}
+<div class="card">
+    <h2>Create New Board</h2>
+    <p style="color: #718096;">As a moderator, you can create boards in this forum.</p>
+    <form method="post" action="/forum/{{ forum_hash }}/board/create">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="board_name">Board Name</label>
+            <input type="text" id="board_name" name="name" required maxlength="100"
+                   placeholder="General Discussion">
+        </div>
+
+        <div class="form-group">
+            <label for="board_description">Description</label>
+            <textarea id="board_description" name="description" maxlength="10000"
+                      placeholder="What is this board for?"></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="board_tags">Tags (comma-separated)</label>
+            <input type="text" id="board_tags" name="tags"
+                   placeholder="general, discussion, help">
+        </div>
+
+        <div class="form-group">
+            <label for="signing_key">Your Signing Key</label>
+            <select id="signing_key" name="signing_key" required>
+                <option value="">-- Select your signing key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="key_password">Key Password (if protected)</label>
+            <input type="password" id="key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Create Board</button>
+    </form>
+</div>
+{% endif %}
+
+{% if is_owner %}
+<div class="card">
+    <h2>Edit Forum</h2>
+    <p style="color: #718096;">As the forum owner, you can edit the forum name and description.</p>
+    <form method="post" action="/forum/{{ forum_hash }}/edit">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="edit_forum_name">New Forum Name (leave empty to keep current)</label>
+            <input type="text" id="edit_forum_name" name="new_name" maxlength="100"
+                   placeholder="{{ forum_name }}">
+        </div>
+
+        <div class="form-group">
+            <label for="edit_forum_description">New Description (leave empty to keep current)</label>
+            <textarea id="edit_forum_description" name="new_description" maxlength="5000"
+                      placeholder="{{ forum_description }}"></textarea>
+        </div>
+
+        <div class="form-group">
+            <label for="edit_forum_signing_key">Your Signing Key (owner key)</label>
+            <select id="edit_forum_signing_key" name="signing_key" required>
+                <option value="">-- Select your owner key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="edit_forum_password">Key Password (if protected)</label>
+            <input type="password" id="edit_forum_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Update Forum</button>
+    </form>
+</div>
+
+<div class="card">
+    <h2>Manage Moderators</h2>
+    <p style="color: #718096;">As the forum owner, you can add or remove moderators.</p>
+
+    <h3>Add Moderator</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/moderator/add">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="add_target_fingerprint">User's Key (select from keyring)</label>
+            <select id="add_target_fingerprint" name="target_fingerprint" required>
+                <option value="">-- Select user to add as moderator --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.fingerprint }}">{{ key.fingerprint }} ({{ key.user_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="add_signing_key">Your Signing Key (owner key)</label>
+            <select id="add_signing_key" name="signing_key" required>
+                <option value="">-- Select your owner key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="add_key_password">Key Password (if protected)</label>
+            <input type="password" id="add_key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn">Add Moderator</button>
+    </form>
+
+    {% if moderators.len() > 1 %}
+    <h3 style="margin-top: 2em;">Remove Moderator</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/moderator/remove">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+        <div class="form-group">
+            <label for="remove_target_fingerprint">Moderator to Remove</label>
+            <select id="remove_target_fingerprint" name="target_fingerprint" required>
+                <option value="">-- Select moderator to remove --</option>
+                {% for key in signing_keys %}
+                {% for mod in moderators %}
+                {% if !mod.is_owner && key.fingerprint == mod.identity_fingerprint %}
+                <option value="{{ key.fingerprint }}">{{ key.fingerprint }} ({{ key.user_id }})</option>
+                {% endif %}
+                {% endfor %}
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="remove_signing_key">Your Signing Key (owner key)</label>
+            <select id="remove_signing_key" name="signing_key" required>
+                <option value="">-- Select your owner key --</option>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.key_id }})</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="form-group">
+            <label for="remove_key_password">Key Password (if protected)</label>
+            <input type="password" id="remove_key_password" name="password"
+                   placeholder="Enter password if key is protected">
+        </div>
+
+        <button type="submit" class="btn btn-danger">Remove Moderator</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+    <h2>Remove Forum</h2>
+    <p style="color: #718096;">Remove this forum from your local storage. The forum will still exist on the relay - you can re-join it anytime using the forum hash.</p>
+    <form method="post" action="/forum/{{ forum_hash }}/remove" onsubmit="return confirm('Are you sure you want to remove this forum from your local storage?');">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="_confirm" value="yes">
+        <button type="submit" class="btn btn-danger">Remove Forum</button>
+    </form>
+</div>
+
+{% endblock %}
