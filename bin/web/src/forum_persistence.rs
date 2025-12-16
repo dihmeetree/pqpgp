@@ -517,6 +517,44 @@ impl WebForumPersistence {
         Ok(Some((name, description)))
     }
 
+    /// Gets the effective forum name and description after applying edits.
+    ///
+    /// Returns (name, description) with the most recent edit values applied.
+    pub fn get_effective_forum_info(
+        &self,
+        forum_hash: &ContentHash,
+    ) -> Result<Option<(String, String)>, String> {
+        // Get the forum metadata (original values)
+        let metadata = match self.load_forum_metadata(forum_hash)? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let mut name = metadata.name;
+        let mut description = metadata.description;
+
+        // Get all edit nodes for this forum, sorted by timestamp (newest last)
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut edits: Vec<&EditNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_edit())
+            .filter(|e| e.target_hash() == forum_hash) // Forum edits target the forum itself
+            .collect();
+        edits.sort_by_key(|e| e.created_at());
+
+        // Apply edits in order (most recent wins)
+        for edit in edits {
+            if let Some(new_name) = edit.new_name() {
+                name = new_name.to_string();
+            }
+            if let Some(new_desc) = edit.new_description() {
+                description = new_desc.to_string();
+            }
+        }
+
+        Ok(Some((name, description)))
+    }
+
     /// Gets a specific thread by hash.
     pub fn get_thread(
         &self,

@@ -79,17 +79,38 @@ fn fingerprint_from_identity(identity: &[u8]) -> String {
     hex::encode(&fingerprint[..8]) // First 16 hex chars
 }
 
+/// Gets effective forum name/description after applying edits.
+fn get_effective_forum_info(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+    fallback_name: &str,
+    fallback_description: &str,
+) -> (String, String) {
+    persistence
+        .get_effective_forum_info(forum_hash)
+        .unwrap_or_else(|_| Some((fallback_name.to_string(), fallback_description.to_string())))
+        .unwrap_or_else(|| (fallback_name.to_string(), fallback_description.to_string()))
+}
+
+/// Gets effective board name/description after applying edits.
+fn get_effective_board_info(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+    board: &BoardGenesis,
+) -> (String, String) {
+    persistence
+        .get_effective_board_info(forum_hash, board.hash())
+        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
+        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()))
+}
+
 /// Builds a BoardDisplayInfo with edits applied.
 fn build_board_display_info(
     persistence: &SharedForumPersistence,
     forum_hash: &ContentHash,
     board: &BoardGenesis,
 ) -> BoardDisplayInfo {
-    // Get effective name/description after applying edits
-    let (name, description) = persistence
-        .get_effective_board_info(forum_hash, board.hash())
-        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
-        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
+    let (name, description) = get_effective_board_info(persistence, forum_hash, board);
 
     BoardDisplayInfo {
         hash: board.hash().to_hex(),
@@ -632,10 +653,18 @@ pub async fn forum_list_page(
                         .map(|nodes| nodes.len())
                         .unwrap_or(0);
 
+                    // Get effective name/description after applying edits
+                    let (name, description) = get_effective_forum_info(
+                        &app_state.forum_persistence,
+                        &hash,
+                        &metadata.name,
+                        &metadata.description,
+                    );
+
                     forums.push(ForumDisplayInfo {
                         hash: hash.to_hex(),
-                        name: metadata.name,
-                        description: metadata.description,
+                        name,
+                        description,
                         node_count,
                         created_at_display: format_timestamp(metadata.created_at),
                     });
@@ -867,13 +896,21 @@ pub async fn forum_view_page(
         .iter()
         .any(|mod_fp| user_fingerprints.iter().any(|fp| fp == mod_fp));
 
+    // Get effective forum name/description (after applying any edits)
+    let (forum_name, forum_description) = get_effective_forum_info(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &metadata.name,
+        &metadata.description,
+    );
+
     let template = ForumViewTemplate {
         active_page: "forum".to_string(),
         csrf_token,
         forum_hash: forum_hash.clone(),
         forum_hash_short: forum_hash.chars().take(16).collect(),
-        forum_name: metadata.name,
-        forum_description: metadata.description,
+        forum_name,
+        forum_description,
         created_at_display: format_timestamp(metadata.created_at),
         boards,
         signing_keys,
@@ -1103,17 +1140,22 @@ pub async fn board_view_page(
         .any(|mod_fp| user_fingerprints.iter().any(|fp| fp == mod_fp));
 
     // Get effective board name/description (after applying any edits)
-    let (board_name, board_description) = app_state
-        .forum_persistence
-        .get_effective_board_info(&forum_content_hash, &board_content_hash)
-        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
-        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
+    let (board_name, board_description) =
+        get_effective_board_info(&app_state.forum_persistence, &forum_content_hash, &board);
+
+    // Get effective forum name (after applying any edits)
+    let (forum_name, _) = get_effective_forum_info(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &forum_metadata.name,
+        &forum_metadata.description,
+    );
 
     let template = BoardViewTemplate {
         active_page: "forum".to_string(),
         csrf_token,
         forum_hash: forum_hash.clone(),
-        forum_name: forum_metadata.name,
+        forum_name,
         board_hash: board_hash.clone(),
         board_name,
         board_description,
@@ -1355,17 +1397,22 @@ pub async fn thread_view_page(
         .collect();
 
     // Get effective board name (after applying any edits)
-    let (board_name, _) = app_state
-        .forum_persistence
-        .get_effective_board_info(&forum_content_hash, board.hash())
-        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
-        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
+    let (board_name, _) =
+        get_effective_board_info(&app_state.forum_persistence, &forum_content_hash, &board);
+
+    // Get effective forum name (after applying any edits)
+    let (forum_name, _) = get_effective_forum_info(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &forum_metadata.name,
+        &forum_metadata.description,
+    );
 
     let template = ThreadViewTemplate {
         active_page: "forum".to_string(),
         csrf_token,
         forum_hash: forum_hash.clone(),
-        forum_name: forum_metadata.name,
+        forum_name,
         board_hash: board.hash().to_hex(),
         board_name,
         thread_hash: thread_hash.clone(),
