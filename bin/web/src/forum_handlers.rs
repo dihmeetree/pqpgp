@@ -79,6 +79,27 @@ fn fingerprint_from_identity(identity: &[u8]) -> String {
     hex::encode(&fingerprint[..8]) // First 16 hex chars
 }
 
+/// Builds a BoardDisplayInfo with edits applied.
+fn build_board_display_info(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+    board: &BoardGenesis,
+) -> BoardDisplayInfo {
+    // Get effective name/description after applying edits
+    let (name, description) = persistence
+        .get_effective_board_info(forum_hash, board.hash())
+        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
+        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
+
+    BoardDisplayInfo {
+        hash: board.hash().to_hex(),
+        name,
+        description,
+        tags: board.tags().to_vec(),
+        created_at_display: format_timestamp(board.created_at()),
+    }
+}
+
 /// Syncs a forum from the relay to local storage.
 ///
 /// This implements the full sync protocol:
@@ -811,13 +832,7 @@ pub async fn forum_view_page(
         .unwrap_or_default()
         .into_iter()
         .filter(|b| !hidden_boards.contains(b.hash()))
-        .map(|b| BoardDisplayInfo {
-            hash: b.hash().to_hex(),
-            name: b.name().to_string(),
-            description: b.description().to_string(),
-            tags: b.tags().to_vec(),
-            created_at_display: format_timestamp(b.created_at()),
-        })
+        .map(|b| build_board_display_info(&app_state.forum_persistence, &forum_content_hash, &b))
         .collect();
 
     // Load moderators from local storage
@@ -1087,14 +1102,21 @@ pub async fn board_view_page(
         .iter()
         .any(|mod_fp| user_fingerprints.iter().any(|fp| fp == mod_fp));
 
+    // Get effective board name/description (after applying any edits)
+    let (board_name, board_description) = app_state
+        .forum_persistence
+        .get_effective_board_info(&forum_content_hash, &board_content_hash)
+        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
+        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
+
     let template = BoardViewTemplate {
         active_page: "forum".to_string(),
         csrf_token,
         forum_hash: forum_hash.clone(),
         forum_name: forum_metadata.name,
         board_hash: board_hash.clone(),
-        board_name: board.name().to_string(),
-        board_description: board.description().to_string(),
+        board_name,
+        board_description,
         board_tags: board.tags().to_vec(),
         threads,
         signing_keys,
@@ -1329,14 +1351,15 @@ pub async fn thread_view_page(
     let all_boards: Vec<BoardDisplayInfo> = all_boards_data
         .into_iter()
         .filter(|b| !hidden_boards.contains(b.hash()))
-        .map(|b| BoardDisplayInfo {
-            hash: b.hash().to_hex(),
-            name: b.name().to_string(),
-            description: b.description().to_string(),
-            tags: b.tags().to_vec(),
-            created_at_display: format_timestamp(b.created_at()),
-        })
+        .map(|b| build_board_display_info(&app_state.forum_persistence, &forum_content_hash, &b))
         .collect();
+
+    // Get effective board name (after applying any edits)
+    let (board_name, _) = app_state
+        .forum_persistence
+        .get_effective_board_info(&forum_content_hash, board.hash())
+        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
+        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
 
     let template = ThreadViewTemplate {
         active_page: "forum".to_string(),
@@ -1344,7 +1367,7 @@ pub async fn thread_view_page(
         forum_hash: forum_hash.clone(),
         forum_name: forum_metadata.name,
         board_hash: board.hash().to_hex(),
-        board_name: board.name().to_string(),
+        board_name,
         thread_hash: thread_hash.clone(),
         thread_title: thread.title().to_string(),
         thread_body: thread.body().to_string(),

@@ -12,7 +12,7 @@
 //! - `meta`: `forum_list` -> list of all synced forum hashes
 
 use pqpgp::forum::{
-    BoardGenesis, ContentHash, DagNode, ModAction, ModActionNode, Post, ThreadRoot,
+    BoardGenesis, ContentHash, DagNode, EditNode, ModAction, ModActionNode, Post, ThreadRoot,
 };
 use rocksdb::{
     BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options,
@@ -476,6 +476,45 @@ impl WebForumPersistence {
     ) -> Result<Option<BoardGenesis>, String> {
         let node = self.load_node(forum_hash, board_hash)?;
         Ok(node.and_then(|n| n.as_board_genesis().cloned()))
+    }
+
+    /// Gets the effective board name and description after applying edits.
+    ///
+    /// Returns (name, description) with the most recent edit values applied.
+    pub fn get_effective_board_info(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+    ) -> Result<Option<(String, String)>, String> {
+        // Get the original board
+        let board = match self.get_board(forum_hash, board_hash)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let mut name = board.name().to_string();
+        let mut description = board.description().to_string();
+
+        // Get all edit nodes for this board, sorted by timestamp (newest last)
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut edits: Vec<&EditNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_edit())
+            .filter(|e| e.target_hash() == board_hash)
+            .collect();
+        edits.sort_by_key(|e| e.created_at());
+
+        // Apply edits in order (most recent wins)
+        for edit in edits {
+            if let Some(new_name) = edit.new_name() {
+                name = new_name.to_string();
+            }
+            if let Some(new_desc) = edit.new_description() {
+                description = new_desc.to_string();
+            }
+        }
+
+        Ok(Some((name, description)))
     }
 
     /// Gets a specific thread by hash.
