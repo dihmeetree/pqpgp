@@ -675,7 +675,7 @@ pub async fn create_forum_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to("/forum").into_response();
@@ -911,7 +911,7 @@ pub async fn create_board_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
@@ -1141,7 +1141,7 @@ pub async fn create_thread_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -1391,7 +1391,7 @@ pub async fn post_reply_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -1399,7 +1399,7 @@ pub async fn post_reply_handler(
     if data
         .quote_hash
         .as_ref()
-        .map_or(false, |h| h.len() > MAX_HASH_INPUT_SIZE)
+        .is_some_and(|h| h.len() > MAX_HASH_INPUT_SIZE)
     {
         warn!("Quote hash too large");
         return Redirect::to(&redirect_url).into_response();
@@ -1655,7 +1655,7 @@ pub async fn add_moderator_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -1757,7 +1757,7 @@ pub async fn remove_moderator_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -1879,7 +1879,7 @@ pub async fn add_board_moderator_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -1999,7 +1999,7 @@ pub async fn remove_board_moderator_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2119,7 +2119,7 @@ pub async fn move_thread_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2227,7 +2227,7 @@ pub async fn hide_thread_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2249,6 +2249,22 @@ pub async fn hide_thread_handler(
             error!("Invalid thread hash: {}", thread_hash);
             return Redirect::to(&format!("/forum/{}/thread/{}", forum_hash, thread_hash))
                 .into_response();
+        }
+    };
+
+    // Get the thread to find its board hash (before we hide it)
+    let board_hash = match app_state
+        .forum_persistence
+        .get_thread(&forum_content_hash, &thread_content_hash)
+    {
+        Ok(Some(thread)) => thread.board_hash().to_hex(),
+        Ok(None) => {
+            error!("Thread not found: {}", thread_hash);
+            return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
+        }
+        Err(e) => {
+            error!("Failed to load thread: {}", e);
+            return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
         }
     };
 
@@ -2300,9 +2316,8 @@ pub async fn hide_thread_handler(
 
     info!("Hidden thread: {}", thread_hash);
 
-    // Redirect back to the board (since the thread is now hidden)
-    // We need to find the board hash - for now redirect to forum
-    Redirect::to(&format!("/forum/{}", forum_hash)).into_response()
+    // Redirect back to the board
+    Redirect::to(&format!("/forum/{}/board/{}", forum_hash, board_hash)).into_response()
 }
 
 /// Hide post handler
@@ -2333,7 +2348,7 @@ pub async fn hide_post_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2432,7 +2447,7 @@ pub async fn hide_board_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2533,7 +2548,7 @@ pub async fn unhide_board_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2629,7 +2644,7 @@ pub async fn edit_forum_handler(
     if data
         .new_name
         .as_ref()
-        .map_or(false, |n| n.len() > MAX_NAME_SIZE)
+        .is_some_and(|n| n.len() > MAX_NAME_SIZE)
     {
         warn!("New name too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2637,7 +2652,7 @@ pub async fn edit_forum_handler(
     if data
         .new_description
         .as_ref()
-        .map_or(false, |d| d.len() > MAX_DESCRIPTION_SIZE)
+        .is_some_and(|d| d.len() > MAX_DESCRIPTION_SIZE)
     {
         warn!("New description too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2649,7 +2664,7 @@ pub async fn edit_forum_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2746,7 +2761,7 @@ pub async fn edit_board_handler(
     if data
         .new_name
         .as_ref()
-        .map_or(false, |n| n.len() > MAX_NAME_SIZE)
+        .is_some_and(|n| n.len() > MAX_NAME_SIZE)
     {
         warn!("New name too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2754,7 +2769,7 @@ pub async fn edit_board_handler(
     if data
         .new_description
         .as_ref()
-        .map_or(false, |d| d.len() > MAX_DESCRIPTION_SIZE)
+        .is_some_and(|d| d.len() > MAX_DESCRIPTION_SIZE)
     {
         warn!("New description too large");
         return Redirect::to(&redirect_url).into_response();
@@ -2766,7 +2781,7 @@ pub async fn edit_board_handler(
     if data
         .password
         .as_ref()
-        .map_or(false, |p| p.len() > MAX_PASSWORD_SIZE)
+        .is_some_and(|p| p.len() > MAX_PASSWORD_SIZE)
     {
         warn!("Password too large");
         return Redirect::to(&redirect_url).into_response();
