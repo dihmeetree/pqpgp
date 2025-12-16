@@ -8,6 +8,20 @@
 //! - **Content size limits**: Node content is validated for maximum size
 //! - **Authorization**: Delete operations require owner signature
 //! - **Pagination**: Export uses pagination to prevent memory exhaustion
+//! - **Global resource limits**: Maximum forums and nodes per forum enforced
+//!
+//! ## Privacy Model for Hidden Content
+//!
+//! Hidden content (threads, posts, boards) remains accessible via direct fetch by hash.
+//! This is intentional for DAG integrity and synchronization:
+//!
+//! - **DAG requires all nodes**: Cryptographic verification needs complete node set
+//! - **Hidden status is mutable**: Content can be unhidden later
+//! - **Listing endpoints filter**: `list_threads` and `list_posts` exclude hidden content
+//! - **Sync returns all nodes**: Clients need complete DAG for signature verification
+//!
+//! Hiding is a display-level moderation action, not data deletion. The relay stores
+//! all valid nodes; clients are responsible for respecting hidden flags in their UI.
 
 use crate::forum_persistence::PersistentForumState;
 use axum::{
@@ -89,6 +103,18 @@ const MAX_TAG_LENGTH: usize = 64;
 /// Minimum valid timestamp (2024-01-01 00:00:00 UTC in milliseconds).
 /// Nodes with timestamps before this are rejected as invalid.
 const MIN_VALID_TIMESTAMP_MS: u64 = 1704067200000;
+
+// =============================================================================
+// Global Resource Limits
+// =============================================================================
+
+/// Maximum number of forums that can be hosted on this relay.
+/// This prevents storage exhaustion attacks by limiting forum creation.
+const MAX_FORUMS: usize = 10000;
+
+/// Maximum number of nodes per forum (includes all node types).
+/// This prevents any single forum from consuming excessive storage.
+const MAX_NODES_PER_FORUM: usize = 1_000_000;
 
 /// Computes a fingerprint from raw ML-DSA-87 identity bytes and returns first 8 bytes as hex.
 fn compute_identity_fingerprint(identity: &[u8]) -> String {
@@ -344,6 +370,24 @@ pub async fn create_forum(
         _ => {}
     }
 
+    // Check global forum limit before acquiring write lock
+    {
+        let relay = acquire_read_lock(&state);
+        if relay.forums().len() >= MAX_FORUMS {
+            warn!(
+                "Forum creation rejected: relay at maximum capacity ({} forums)",
+                MAX_FORUMS
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(ForumApiResponse::error(format!(
+                    "Relay at maximum capacity ({} forums)",
+                    MAX_FORUMS
+                ))),
+            );
+        }
+    }
+
     // Create the forum
     let mut relay = acquire_write_lock(&state);
     match relay.create_forum(genesis.clone()) {
@@ -559,6 +603,22 @@ pub async fn submit_node(
                 );
             }
         };
+
+        // Check per-forum node limit
+        if forum.node_count() >= MAX_NODES_PER_FORUM {
+            warn!(
+                "Node rejected: forum {} at maximum capacity ({} nodes)",
+                request.forum_hash.short(),
+                MAX_NODES_PER_FORUM
+            );
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(SubmitNodeResponse::rejected(format!(
+                    "Forum at maximum capacity ({} nodes)",
+                    MAX_NODES_PER_FORUM
+                ))),
+            );
+        }
 
         // Build validation context
         let permissions: HashMap<ContentHash, ForumPermissions> = forum

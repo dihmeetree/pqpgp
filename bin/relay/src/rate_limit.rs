@@ -260,33 +260,44 @@ where
 
 /// Extracts the client IP address from the request.
 ///
+/// **Security Note**: X-Forwarded-For and X-Real-IP headers are only trusted when
+/// the `TRUST_PROXY_HEADERS` environment variable is set to "true". This prevents
+/// attackers from spoofing their IP address when the relay is directly exposed.
+///
 /// Checks the following in order:
-/// 1. X-Forwarded-For header (first IP in chain)
-/// 2. X-Real-IP header
+/// 1. X-Forwarded-For header (first IP in chain) - only if TRUST_PROXY_HEADERS=true
+/// 2. X-Real-IP header - only if TRUST_PROXY_HEADERS=true
 /// 3. Connection info (direct connection)
 fn extract_client_ip<B>(req: &Request<B>) -> Option<IpAddr> {
-    // Try X-Forwarded-For first (for reverse proxy setups)
-    if let Some(forwarded) = req.headers().get("x-forwarded-for") {
-        if let Ok(forwarded_str) = forwarded.to_str() {
-            // Take the first IP in the chain (original client)
-            if let Some(first_ip) = forwarded_str.split(',').next() {
-                if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+    // Only trust proxy headers if explicitly configured (e.g., behind nginx/cloudflare)
+    let trust_proxy_headers = std::env::var("TRUST_PROXY_HEADERS")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    if trust_proxy_headers {
+        // Try X-Forwarded-For first (for reverse proxy setups)
+        if let Some(forwarded) = req.headers().get("x-forwarded-for") {
+            if let Ok(forwarded_str) = forwarded.to_str() {
+                // Take the first IP in the chain (original client)
+                if let Some(first_ip) = forwarded_str.split(',').next() {
+                    if let Ok(ip) = first_ip.trim().parse::<IpAddr>() {
+                        return Some(ip);
+                    }
+                }
+            }
+        }
+
+        // Try X-Real-IP header
+        if let Some(real_ip) = req.headers().get("x-real-ip") {
+            if let Ok(real_ip_str) = real_ip.to_str() {
+                if let Ok(ip) = real_ip_str.trim().parse::<IpAddr>() {
                     return Some(ip);
                 }
             }
         }
     }
 
-    // Try X-Real-IP header
-    if let Some(real_ip) = req.headers().get("x-real-ip") {
-        if let Ok(real_ip_str) = real_ip.to_str() {
-            if let Ok(ip) = real_ip_str.trim().parse::<IpAddr>() {
-                return Some(ip);
-            }
-        }
-    }
-
-    // Fallback: try to get from connection info
+    // Fallback: try to get from connection info (always trusted)
     // Note: This requires the ConnectInfo extractor to be set up
     req.extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()

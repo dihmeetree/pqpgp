@@ -121,6 +121,58 @@ fn build_board_display_info(
     }
 }
 
+// =============================================================================
+// Permission Checking Helpers
+// =============================================================================
+
+/// Permission level required for a moderation action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionLevel {
+    /// Only the forum owner can perform this action.
+    OwnerOnly,
+    /// Forum owner or forum-level moderator can perform this action.
+    ForumModerator,
+}
+
+/// Checks if the signing key has the required permission level for a forum action.
+///
+/// This is a server-side pre-check to avoid wasting resources on unauthorized actions.
+/// The DAG validation will still verify permissions cryptographically.
+fn check_forum_permission(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+    signing_key_fingerprint: &str,
+    required_level: PermissionLevel,
+) -> bool {
+    let (mod_fingerprints, owner_fingerprint) = match persistence.get_forum_moderators(forum_hash) {
+        Ok(result) => result,
+        Err(e) => {
+            warn!("Failed to get forum moderators for permission check: {}", e);
+            return false;
+        }
+    };
+
+    match required_level {
+        PermissionLevel::OwnerOnly => {
+            // Only owner can perform this action
+            owner_fingerprint
+                .as_ref()
+                .is_some_and(|owner| owner == signing_key_fingerprint)
+        }
+        PermissionLevel::ForumModerator => {
+            // Owner or any forum moderator can perform this action
+            mod_fingerprints.contains(signing_key_fingerprint)
+        }
+    }
+}
+
+/// Gets the fingerprint of a signing key by its ID.
+fn get_signing_key_fingerprint(signing_key_id: &str) -> Option<String> {
+    let signing = get_signing_materials(signing_key_id).ok()?;
+    let fp = signing.public_key.fingerprint();
+    Some(hex::encode(&fp[..8]))
+}
+
 /// Syncs a forum from the relay to local storage.
 ///
 /// This implements the full sync protocol:
@@ -1740,6 +1792,27 @@ pub async fn add_moderator_handler(
         }
     };
 
+    // Server-side permission check: AddModerator requires owner
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for add moderator");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::OwnerOnly,
+    ) {
+        warn!(
+            "Unauthorized add moderator attempt by {} on forum {}",
+            signer_fingerprint, forum_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
+
     // Get signing materials (owner's key)
     let signing = match get_signing_materials(&data.signing_key) {
         Ok(s) => s,
@@ -1841,6 +1914,27 @@ pub async fn remove_moderator_handler(
             return Redirect::to(&redirect_url).into_response();
         }
     };
+
+    // Server-side permission check: RemoveModerator requires owner
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for remove moderator");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::OwnerOnly,
+    ) {
+        warn!(
+            "Unauthorized remove moderator attempt by {} on forum {}",
+            signer_fingerprint, forum_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
 
     // Get signing materials (owner's key)
     let signing = match get_signing_materials(&data.signing_key) {
@@ -1974,6 +2068,27 @@ pub async fn add_board_moderator_handler(
         }
     };
 
+    // Server-side permission check: AddBoardModerator requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for add board moderator");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized add board moderator attempt by {} on board {}",
+            signer_fingerprint, board_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
+
     // Get signing materials (forum moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
         Ok(s) => s,
@@ -2093,6 +2208,27 @@ pub async fn remove_board_moderator_handler(
                 .into_response();
         }
     };
+
+    // Server-side permission check: RemoveBoardModerator requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for remove board moderator");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized remove board moderator attempt by {} on board {}",
+            signer_fingerprint, board_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
 
     // Get signing materials (forum moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
@@ -2220,6 +2356,27 @@ pub async fn move_thread_handler(
         }
     };
 
+    // Server-side permission check: MoveThread requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for move thread");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized move thread attempt by {} on thread {}",
+            signer_fingerprint, thread_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
+
     // Get signing materials (moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
         Ok(s) => s,
@@ -2338,6 +2495,27 @@ pub async fn hide_thread_handler(
         }
     };
 
+    // Server-side permission check: HideThread requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for hide thread");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized hide thread attempt by {} on thread {}",
+            signer_fingerprint, thread_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
+
     // Get signing materials (moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
         Ok(s) => s,
@@ -2443,6 +2621,27 @@ pub async fn hide_post_handler(
         }
     };
 
+    // Server-side permission check: HidePost requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for hide post");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized hide post attempt by {} on post {}",
+            signer_fingerprint, data.post_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
+
     // Get signing materials (moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
         Ok(s) => s,
@@ -2541,6 +2740,27 @@ pub async fn hide_board_handler(
                 .into_response();
         }
     };
+
+    // Server-side permission check: HideBoard requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for hide board");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized hide board attempt by {} on board {}",
+            signer_fingerprint, board_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
 
     // Get signing materials (moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
@@ -2642,6 +2862,27 @@ pub async fn unhide_board_handler(
                 .into_response();
         }
     };
+
+    // Server-side permission check: UnhideBoard requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for unhide board");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized unhide board attempt by {} on board {}",
+            signer_fingerprint, board_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
 
     // Get signing materials (moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
@@ -2757,6 +2998,27 @@ pub async fn edit_forum_handler(
             return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
         }
     };
+
+    // Server-side permission check: EditForum requires owner
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for edit forum");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::OwnerOnly,
+    ) {
+        warn!(
+            "Unauthorized edit forum attempt by {} on forum {}",
+            signer_fingerprint, forum_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
 
     // Get signing materials (owner's key)
     let signing = match get_signing_materials(&data.signing_key) {
@@ -2885,6 +3147,27 @@ pub async fn edit_board_handler(
                 .into_response();
         }
     };
+
+    // Server-side permission check: EditBoard requires forum moderator
+    let signer_fingerprint = match get_signing_key_fingerprint(&data.signing_key) {
+        Some(fp) => fp,
+        None => {
+            warn!("Invalid signing key for edit board");
+            return Redirect::to(&redirect_url).into_response();
+        }
+    };
+    if !check_forum_permission(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &signer_fingerprint,
+        PermissionLevel::ForumModerator,
+    ) {
+        warn!(
+            "Unauthorized edit board attempt by {} on board {}",
+            signer_fingerprint, board_hash
+        );
+        return Redirect::to(&redirect_url).into_response();
+    }
 
     // Get signing materials (owner/moderator's key)
     let signing = match get_signing_materials(&data.signing_key) {
