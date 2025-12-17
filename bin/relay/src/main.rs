@@ -509,35 +509,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(messaging_read_router);
 
     // Build forum router with rate limiting
-    // Write operations (create forum, sync, submit nodes)
+    // Write operations (sync, submit nodes)
     let forum_write_router = Router::new()
-        .route("/", post(forum::handlers::create_forum))
         .route("/sync", post(forum::handlers::sync_forum))
         .route("/nodes/fetch", post(forum::handlers::fetch_nodes))
         .route("/nodes/submit", post(forum::handlers::submit_node))
         .with_state(forum_state.clone())
         .layer(write_rate_limit);
 
-    // Read operations (list forums, get forum, export, etc.)
+    // Read operations (list forums, export)
     let forum_read_router = Router::new()
         .route("/", get(forum::handlers::list_forums))
-        .route("/stats", get(forum::handlers::forum_stats))
-        .route("/:hash", get(forum::handlers::get_forum))
+        .route("/stats", get(forum::handlers::stats))
         .route("/:hash/export", get(forum::handlers::export_forum))
-        .route("/:hash/boards", get(forum::handlers::list_boards))
-        .route("/:hash/moderators", get(forum::handlers::list_moderators))
-        .route(
-            "/:forum_hash/boards/:board_hash/moderators",
-            get(forum::handlers::list_board_moderators),
-        )
-        .route(
-            "/:forum_hash/boards/:board_hash/threads",
-            get(forum::handlers::list_threads),
-        )
-        .route(
-            "/:forum_hash/threads/:thread_hash/posts",
-            get(forum::handlers::list_posts),
-        )
         .with_state(forum_state.clone())
         .layer(read_rate_limit);
 
@@ -569,18 +553,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("  GET    /health                - Health check");
     info!("  GET    /stats                 - Server statistics");
     info!("");
-    info!("Forum Endpoints:");
+    info!("Forum DAG Sync Endpoints:");
     info!("  GET    /forums                - List all forums");
-    info!("  POST   /forums                - Create a new forum");
-    info!("  GET    /forums/stats          - Forum statistics");
+    info!("  GET    /forums/stats          - Relay statistics");
     info!("  POST   /forums/sync           - Sync request (get missing hashes)");
     info!("  POST   /forums/nodes/fetch    - Fetch nodes by hash");
-    info!("  POST   /forums/nodes/submit   - Submit a new node");
-    info!("  GET    /forums/:hash          - Get forum details");
+    info!("  POST   /forums/nodes/submit   - Submit a new node (incl. ForumGenesis)");
     info!("  GET    /forums/:hash/export   - Export entire forum DAG");
-    info!("  GET    /forums/:hash/boards   - List boards in forum");
-    info!("  GET    /forums/:fh/boards/:bh/threads - List threads");
-    info!("  GET    /forums/:fh/threads/:th/posts  - List posts");
     info!("");
     info!("Peer Sync Options:");
     info!("  --peers <url1,url2,...>         - Peer relay URLs to sync from");

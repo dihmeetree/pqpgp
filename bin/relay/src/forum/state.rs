@@ -5,7 +5,7 @@
 
 use pqpgp::forum::dag_ops::{compute_missing, compute_reachable, nodes_in_topological_order};
 use pqpgp::forum::{
-    ContentHash, DagNode, EditType, ForumGenesis, ForumPermissions, NodeType, PermissionBuilder,
+    ContentHash, DagNode, ForumGenesis, ForumPermissions, NodeType, PermissionBuilder,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -116,73 +116,6 @@ impl ForumState {
         }) {
             self.permissions = builder.into_permissions().remove(&hash);
         }
-    }
-
-    /// Gets the effective forum name after applying all edits.
-    ///
-    /// Returns the most recent edit's name if any, otherwise the original name.
-    pub fn effective_forum_name(&self, forum_hash: &ContentHash) -> String {
-        self.get_latest_edit(forum_hash, EditType::EditForum)
-            .and_then(|edit| edit.new_name().map(|s| s.to_string()))
-            .unwrap_or_else(|| self.name.clone())
-    }
-
-    /// Gets the effective forum description after applying all edits.
-    ///
-    /// Returns the most recent edit's description if any, otherwise the original description.
-    pub fn effective_forum_description(&self, forum_hash: &ContentHash) -> String {
-        self.get_latest_edit(forum_hash, EditType::EditForum)
-            .and_then(|edit| edit.new_description().map(|s| s.to_string()))
-            .unwrap_or_else(|| self.description.clone())
-    }
-
-    /// Gets the effective board name after applying all edits.
-    ///
-    /// Returns the most recent edit's name if any, otherwise the original name.
-    pub fn effective_board_name(&self, board_hash: &ContentHash) -> Option<String> {
-        // First, find the original board
-        let original_name = self
-            .nodes
-            .get(board_hash)
-            .and_then(|node| node.as_board_genesis().map(|b| b.name().to_string()))?;
-
-        // Then check for edits
-        let edited_name = self
-            .get_latest_edit(board_hash, EditType::EditBoard)
-            .and_then(|edit| edit.new_name().map(|s| s.to_string()));
-
-        Some(edited_name.unwrap_or(original_name))
-    }
-
-    /// Gets the effective board description after applying all edits.
-    ///
-    /// Returns the most recent edit's description if any, otherwise the original description.
-    pub fn effective_board_description(&self, board_hash: &ContentHash) -> Option<String> {
-        // First, find the original board
-        let original_desc = self
-            .nodes
-            .get(board_hash)
-            .and_then(|node| node.as_board_genesis().map(|b| b.description().to_string()))?;
-
-        // Then check for edits
-        let edited_desc = self
-            .get_latest_edit(board_hash, EditType::EditBoard)
-            .and_then(|edit| edit.new_description().map(|s| s.to_string()));
-
-        Some(edited_desc.unwrap_or(original_desc))
-    }
-
-    /// Gets the latest edit node for a given target, if any.
-    fn get_latest_edit(
-        &self,
-        target_hash: &ContentHash,
-        edit_type: EditType,
-    ) -> Option<&pqpgp::forum::EditNode> {
-        self.nodes
-            .values()
-            .filter_map(|node| node.as_edit())
-            .filter(|edit| edit.target_hash() == target_hash && edit.edit_type() == edit_type)
-            .max_by_key(|edit| edit.created_at())
     }
 }
 
