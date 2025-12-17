@@ -16,7 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Maximum number of parent hashes a mod action can reference.
-pub const MAX_MOD_ACTION_PARENTS: usize = 10;
+/// Set high enough to handle active forums with many concurrent heads.
+pub const MAX_MOD_ACTION_PARENTS: usize = 50;
 
 /// The content of a moderation action node that gets signed and hashed.
 ///

@@ -18,7 +18,8 @@ use std::fmt;
 pub const MAX_POST_BODY_SIZE: usize = 100 * 1024;
 
 /// Maximum number of parent hashes a post can reference.
-pub const MAX_PARENT_HASHES: usize = 10;
+/// Set high enough to handle active forums with many concurrent heads.
+pub const MAX_PARENT_HASHES: usize = 50;
 
 /// The content of a post node that gets signed and hashed.
 ///

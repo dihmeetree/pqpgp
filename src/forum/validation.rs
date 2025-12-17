@@ -27,7 +27,8 @@ const MAX_CLOCK_SKEW_MS: u64 = 5 * 60 * 1000;
 const MIN_VALID_TIMESTAMP_MS: u64 = 1704067200000;
 
 /// Maximum number of parent hashes allowed in a post.
-const MAX_POST_PARENT_HASHES: usize = 10;
+/// Set high enough to handle active forums with many concurrent heads.
+const MAX_POST_PARENT_HASHES: usize = 50;
 
 /// Maximum post body size (100KB).
 const MAX_POST_BODY_SIZE: usize = 100 * 1024;
