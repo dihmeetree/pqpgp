@@ -5,7 +5,7 @@
 {% block content %}
 <div class="card">
     <h2>Private Messages - {{ forum_name }}</h2>
-    <p><a href="/forum/{{ forum_hash }}">&larr; Back to Forum</a></p>
+    <p><a href="/forum/{{ forum_hash }}" class="btn">&larr; Back to Forum</a></p>
 
     {% if has_error %}
     <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
