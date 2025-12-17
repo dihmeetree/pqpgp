@@ -130,9 +130,9 @@ cargo build --release --workspace
 - **Security headers**: X-Frame-Options, X-Content-Type-Options, X-XSS-Protection, Referrer-Policy
 - Input validation with size limits to prevent DoS attacks
 
-### Message Relay Server
+### Relay Server
 
-For multi-user chat across different server instances, PQPGP includes a dedicated relay server:
+PQPGP includes a dedicated relay server for message routing, forum hosting, and peer-to-peer synchronization:
 
 ```bash
 # Run with default settings (localhost:3001)
