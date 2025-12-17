@@ -44,8 +44,8 @@ pqpgp-relay --peers http://relay1.example.com --sync-interval 120
 
 ```
 ┌─────────────┐         ┌─────────────┐         ┌─────────────┐
-│  Relay A    │ <────── │  Relay B    │ <────── │  Relay C    │
-│ (primary)   │  pull   │ (mirror)    │  pull   │ (new)       │
+│   Relay A   │ <────── │   Relay B   │ <────── │   Relay C   │
+│  (primary)  │  pull   │  (mirror)   │  pull   │    (new)    │
 └─────────────┘         └─────────────┘         └─────────────┘
        ▲                       ▲                       ▲
        │                       │                       │
@@ -68,35 +68,35 @@ pqpgp-relay --peers http://relay1.example.com --sync-interval 120
 
 ### Messaging
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/register` | POST | Register user with prekey bundle |
-| `/register/:fingerprint` | DELETE | Unregister user |
-| `/users` | GET | List all registered users |
-| `/users/:fingerprint` | GET | Get user's prekey bundle |
-| `/messages/:fingerprint` | POST | Send message to recipient |
-| `/messages/:fingerprint` | GET | Fetch messages for recipient |
-| `/messages/:fingerprint/check` | GET | Check pending message count |
-| `/health` | GET | Health check |
-| `/stats` | GET | Server statistics |
+| Endpoint                       | Method | Description                      |
+| ------------------------------ | ------ | -------------------------------- |
+| `/register`                    | POST   | Register user with prekey bundle |
+| `/register/:fingerprint`       | DELETE | Unregister user                  |
+| `/users`                       | GET    | List all registered users        |
+| `/users/:fingerprint`          | GET    | Get user's prekey bundle         |
+| `/messages/:fingerprint`       | POST   | Send message to recipient        |
+| `/messages/:fingerprint`       | GET    | Fetch messages for recipient     |
+| `/messages/:fingerprint/check` | GET    | Check pending message count      |
+| `/health`                      | GET    | Health check                     |
+| `/stats`                       | GET    | Server statistics                |
 
 ### Forums
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/forums` | GET | List all forums |
-| `/forums` | POST | Create a new forum |
-| `/forums/stats` | GET | Forum statistics |
-| `/forums/sync` | POST | Sync request (get missing hashes) |
-| `/forums/nodes/fetch` | POST | Fetch nodes by hash |
-| `/forums/nodes/submit` | POST | Submit a new node |
-| `/forums/:hash` | GET | Get forum details |
-| `/forums/:hash/export` | GET | Export entire forum DAG |
-| `/forums/:hash/boards` | GET | List boards in forum |
-| `/forums/:hash/moderators` | GET | List forum moderators |
-| `/forums/:fh/boards/:bh/moderators` | GET | List board moderators |
-| `/forums/:fh/boards/:bh/threads` | GET | List threads in board |
-| `/forums/:fh/threads/:th/posts` | GET | List posts in thread |
+| Endpoint                            | Method | Description                       |
+| ----------------------------------- | ------ | --------------------------------- |
+| `/forums`                           | GET    | List all forums                   |
+| `/forums`                           | POST   | Create a new forum                |
+| `/forums/stats`                     | GET    | Forum statistics                  |
+| `/forums/sync`                      | POST   | Sync request (get missing hashes) |
+| `/forums/nodes/fetch`               | POST   | Fetch nodes by hash               |
+| `/forums/nodes/submit`              | POST   | Submit a new node                 |
+| `/forums/:hash`                     | GET    | Get forum details                 |
+| `/forums/:hash/export`              | GET    | Export entire forum DAG           |
+| `/forums/:hash/boards`              | GET    | List boards in forum              |
+| `/forums/:hash/moderators`          | GET    | List forum moderators             |
+| `/forums/:fh/boards/:bh/moderators` | GET    | List board moderators             |
+| `/forums/:fh/boards/:bh/threads`    | GET    | List threads in board             |
+| `/forums/:fh/threads/:th/posts`     | GET    | List posts in thread              |
 
 ## Sync Protocol
 
@@ -127,23 +127,23 @@ pqpgp_relay_data/
 
 ## Resource Limits
 
-| Resource | Limit |
-|----------|-------|
-| Maximum forums | 10,000 |
-| Maximum nodes per forum | 1,000,000 |
-| Maximum message size | 1 MB |
-| Maximum queued messages per user | 1,000 |
-| Sync batch size | 10,000 hashes |
-| Fetch batch size | 1,000 nodes |
+| Resource                         | Limit         |
+| -------------------------------- | ------------- |
+| Maximum forums                   | 10,000        |
+| Maximum nodes per forum          | 1,000,000     |
+| Maximum message size             | 1 MB          |
+| Maximum queued messages per user | 1,000         |
+| Sync batch size                  | 10,000 hashes |
+| Fetch batch size                 | 1,000 nodes   |
 
 ## Rate Limiting
 
 The relay implements token bucket rate limiting:
 
-| Operation Type | Limit |
-|----------------|-------|
-| Read operations | 100 requests/second |
-| Write operations | 20 requests/second |
+| Operation Type   | Limit               |
+| ---------------- | ------------------- |
+| Read operations  | 100 requests/second |
+| Write operations | 20 requests/second  |
 
 Rate limits are per-IP address.
 
@@ -174,9 +174,9 @@ pqpgp-relay --bind 0.0.0.0:3002 \
 
 ## Environment Variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `RUST_LOG` | Logging level | `pqpgp_relay=info` |
+| Variable           | Description    | Default            |
+| ------------------ | -------------- | ------------------ |
+| `RUST_LOG`         | Logging level  | `pqpgp_relay=info` |
 | `PQPGP_RELAY_DATA` | Data directory | `pqpgp_relay_data` |
 
 ## Module Structure
