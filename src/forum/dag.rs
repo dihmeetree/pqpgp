@@ -11,7 +11,8 @@
 
 use crate::error::Result;
 use crate::forum::{
-    BoardGenesis, ContentHash, EditNode, ForumGenesis, ModActionNode, NodeType, Post, ThreadRoot,
+    BoardGenesis, ContentHash, EditNode, EncryptionIdentity, ForumGenesis, ModActionNode, NodeType,
+    Post, SealedPrivateMessage, ThreadRoot,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -34,6 +35,10 @@ pub enum DagNode {
     ModAction(ModActionNode),
     /// Edit node - updates forum/board metadata.
     Edit(EditNode),
+    /// Encryption identity - publishes encryption keys for private messaging.
+    EncryptionIdentity(EncryptionIdentity),
+    /// Sealed private message - end-to-end encrypted message with hidden metadata.
+    SealedPrivateMessage(SealedPrivateMessage),
 }
 
 impl fmt::Debug for DagNode {
@@ -70,6 +75,16 @@ impl fmt::Debug for DagNode {
                 .field("target_hash", &node.target_hash())
                 .field("hash", &node.hash())
                 .finish(),
+            DagNode::EncryptionIdentity(node) => f
+                .debug_struct("DagNode::EncryptionIdentity")
+                .field("forum_hash", &node.forum_hash())
+                .field("hash", &node.hash())
+                .finish(),
+            DagNode::SealedPrivateMessage(node) => f
+                .debug_struct("DagNode::SealedPrivateMessage")
+                .field("forum_hash", &node.forum_hash())
+                .field("hash", &node.hash())
+                .finish(),
         }
     }
 }
@@ -84,6 +99,8 @@ impl DagNode {
             DagNode::Post(node) => node.hash(),
             DagNode::ModAction(node) => node.hash(),
             DagNode::Edit(node) => node.hash(),
+            DagNode::EncryptionIdentity(node) => node.hash(),
+            DagNode::SealedPrivateMessage(node) => node.hash(),
         }
     }
 
@@ -96,6 +113,8 @@ impl DagNode {
             DagNode::Post(_) => NodeType::Post,
             DagNode::ModAction(_) => NodeType::ModAction,
             DagNode::Edit(_) => NodeType::Edit,
+            DagNode::EncryptionIdentity(_) => NodeType::EncryptionIdentity,
+            DagNode::SealedPrivateMessage(_) => NodeType::SealedPrivateMessage,
         }
     }
 
@@ -108,10 +127,15 @@ impl DagNode {
             DagNode::Post(node) => node.created_at(),
             DagNode::ModAction(node) => node.created_at(),
             DagNode::Edit(node) => node.created_at(),
+            DagNode::EncryptionIdentity(node) => node.created_at(),
+            DagNode::SealedPrivateMessage(node) => node.created_at(),
         }
     }
 
     /// Returns the author/creator identity bytes.
+    ///
+    /// For sealed private messages, this returns the owner signing key from the
+    /// encryption identity node, NOT the actual sender (which is encrypted).
     pub fn author_identity(&self) -> &[u8] {
         match self {
             DagNode::ForumGenesis(node) => node.creator_identity(),
@@ -120,6 +144,9 @@ impl DagNode {
             DagNode::Post(node) => node.author_identity(),
             DagNode::ModAction(node) => node.issuer_identity(),
             DagNode::Edit(node) => node.editor_identity(),
+            DagNode::EncryptionIdentity(node) => node.owner_signing_key(),
+            // Sealed messages have no visible author - sender is encrypted
+            DagNode::SealedPrivateMessage(_) => &[],
         }
     }
 
@@ -131,6 +158,8 @@ impl DagNode {
     /// - Post: Thread hash + parent post hashes
     /// - ModAction: Forum hash + explicit parent hashes (for causal ordering)
     /// - Edit: Forum hash
+    /// - EncryptionIdentity: Forum hash
+    /// - SealedPrivateMessage: Forum hash (no other references to preserve privacy)
     pub fn parent_hashes(&self) -> Vec<ContentHash> {
         match self {
             DagNode::ForumGenesis(_) => vec![],
@@ -147,6 +176,8 @@ impl DagNode {
                 parents
             }
             DagNode::Edit(node) => vec![*node.forum_hash()],
+            DagNode::EncryptionIdentity(node) => vec![*node.forum_hash()],
+            DagNode::SealedPrivateMessage(node) => vec![*node.forum_hash()],
         }
     }
 
@@ -216,6 +247,22 @@ impl DagNode {
             _ => None,
         }
     }
+
+    /// Returns a reference to the inner EncryptionIdentity if this is one.
+    pub fn as_encryption_identity(&self) -> Option<&EncryptionIdentity> {
+        match self {
+            DagNode::EncryptionIdentity(node) => Some(node),
+            _ => None,
+        }
+    }
+
+    /// Returns a reference to the inner SealedPrivateMessage if this is one.
+    pub fn as_sealed_private_message(&self) -> Option<&SealedPrivateMessage> {
+        match self {
+            DagNode::SealedPrivateMessage(node) => Some(node),
+            _ => None,
+        }
+    }
 }
 
 impl From<ForumGenesis> for DagNode {
@@ -251,6 +298,18 @@ impl From<ModActionNode> for DagNode {
 impl From<EditNode> for DagNode {
     fn from(node: EditNode) -> Self {
         DagNode::Edit(node)
+    }
+}
+
+impl From<EncryptionIdentity> for DagNode {
+    fn from(node: EncryptionIdentity) -> Self {
+        DagNode::EncryptionIdentity(node)
+    }
+}
+
+impl From<SealedPrivateMessage> for DagNode {
+    fn from(node: SealedPrivateMessage) -> Self {
+        DagNode::SealedPrivateMessage(node)
     }
 }
 

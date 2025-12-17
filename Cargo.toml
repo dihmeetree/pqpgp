@@ -27,6 +27,7 @@ pqcrypto-traits = "0.3.5"  # Common traits for PQC operations
 aes-gcm = "0.10.3"         # AES-GCM for symmetric encryption
 sha3 = "0.10.8"            # SHA3 for quantum-resistant hashing
 hkdf = "0.12.4"            # HMAC-based Key Derivation Function
+hmac = "0.12.1"            # HMAC for message authentication
 rand = "0.8.5"             # Cryptographically secure random number generation
 subtle = "2.5"             # Constant-time operations for security
 zeroize = { version = "1.7", features = ["derive"] } # Secure memory clearing
@@ -47,6 +48,9 @@ thiserror = "1.0"          # Error handling macros
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 
+# Database
+rocksdb = "0.24"
+num_cpus = "1.16"
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }

@@ -29,12 +29,17 @@
 
 mod board;
 pub mod client;
+mod conversation;
 mod dag;
 mod edit;
+mod encryption_identity;
 mod genesis;
 mod moderation;
 pub mod permissions;
+mod pm_scanner;
+mod pm_sealed;
 mod post;
+mod sealed_message;
 pub mod storage;
 pub mod sync;
 mod thread;
@@ -43,13 +48,34 @@ pub mod validation;
 
 pub use board::{BoardGenesis, BoardGenesisContent};
 pub use client::ForumClient;
+pub use conversation::{
+    ConversationId, ConversationManager, ConversationSession, ConversationStats, RatchetSendInfo,
+    StoredMessage, CONVERSATION_ID_SIZE, CONVERSATION_KEY_SIZE, MAX_MESSAGES_PER_CONVERSATION,
+};
 pub use dag::DagNode;
 pub use edit::{EditNode, EditNodeContent, EditType};
+pub use encryption_identity::{
+    EncryptionIdentity, EncryptionIdentityContent, EncryptionIdentityGenerator,
+    EncryptionIdentityPrivate,
+};
 pub use genesis::{ForumGenesis, ForumGenesisContent};
 pub use moderation::{ModActionContent, ModActionNode};
 pub use permissions::{ForumPermissions, PermissionBuilder};
+pub use pm_scanner::{
+    check_prekey_status, scan_forum_for_messages, PrekeyStatus, PrivateMessageScanner, ScanResult,
+    OTP_REPLENISHMENT_THRESHOLD,
+};
+pub use pm_sealed::{
+    seal_private_message, seal_private_message_with_session, seal_with_ratchet,
+    unseal_private_message, unseal_private_message_with_session, unseal_with_ratchet,
+    SealedMessageResult, UnsealedMessageResult,
+};
 pub use post::{Post, PostContent};
-pub use storage::ForumStorage;
+pub use sealed_message::{
+    compute_recipient_hint, derive_hint_key, InnerMessage, RatchetHeader, SealedEnvelope,
+    SealedPrivateMessage, SealedPrivateMessageContent, X3DHData,
+};
+pub use storage::{ForumMetadata, ForumStorage};
 pub use sync::{
     ExportForumRequest, ExportForumResponse, FetchNodesRequest, FetchNodesResponse, SerializedNode,
     SubmitNodeRequest, SubmitNodeResponse, SyncRequest, SyncResponse,

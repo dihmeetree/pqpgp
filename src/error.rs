@@ -71,6 +71,10 @@ pub enum PqpgpError {
     /// Prekey errors
     #[error("Prekey error: {0}")]
     Prekey(String),
+
+    /// Storage errors (database operations)
+    #[error("Storage error: {0}")]
+    Storage(String),
 }
 
 impl PqpgpError {
@@ -147,5 +151,10 @@ impl PqpgpError {
     /// Creates a new prekey error.
     pub fn prekey<T: ToString>(msg: T) -> Self {
         Self::Prekey(msg.to_string())
+    }
+
+    /// Creates a new storage error.
+    pub fn storage<T: ToString>(msg: T) -> Self {
+        Self::Storage(msg.to_string())
     }
 }

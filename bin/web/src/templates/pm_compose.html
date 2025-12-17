@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+
+{% block title %}Compose Message - {{ forum_name }}{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Compose Private Message</h2>
+    <p>
+        <a href="/forum/{{ forum_hash }}/pm">&larr; Back to Inbox</a> |
+        <a href="/forum/{{ forum_hash }}">&larr; Back to Forum</a>
+    </p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+</div>
+
+{% match our_identity %}
+{% when None %}
+<div class="card">
+    <div class="alert alert-error">
+        You need to create a PM identity before sending messages.
+        <a href="/forum/{{ forum_hash }}/pm">Go to PM Inbox</a> to set one up.
+    </div>
+</div>
+{% when Some with (_identity) %}
+<div class="card">
+    <h2>New Message</h2>
+    {% if recipients.is_empty() %}
+    <div class="alert alert-error">
+        No other users have published encryption identities in this forum yet.
+        You cannot send private messages until someone else creates their PM identity.
+    </div>
+    {% else %}
+    <form method="post" action="/forum/{{ forum_hash }}/pm/send">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-group">
+            <label for="recipient">Recipient:</label>
+            <select name="recipient" id="recipient" required>
+                <option value="">-- Select recipient --</option>
+                {% for r in recipients %}
+                <option value="{{ r.encryption_identity_hash }}"
+                    {% match recipient %}
+                    {% when Some with (pre_selected) %}
+                        {% if pre_selected.encryption_identity_hash == r.encryption_identity_hash %}selected{% endif %}
+                    {% when None %}
+                    {% endmatch %}>
+                    {{ r.fingerprint_short }} ({{ r.encryption_identity_hash|truncate(16) }}...)
+                </option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="subject">Subject (optional):</label>
+            <input type="text" name="subject" id="subject" maxlength="256" placeholder="Message subject">
+        </div>
+        <div class="form-group">
+            <label for="body">Message:</label>
+            <textarea name="body" id="body" required placeholder="Your private message..." style="height: 200px;"></textarea>
+        </div>
+        <div class="form-group">
+            <label for="signing_key">Sign with Key:</label>
+            <select name="signing_key" id="signing_key" required>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.fingerprint }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="password">Key Password (if protected):</label>
+            <input type="password" name="password" id="password" placeholder="Leave empty if not password-protected">
+        </div>
+        <button type="submit" class="btn">Send Message</button>
+    </form>
+    {% endif %}
+</div>
+{% endmatch %}
+
+<!-- Info about PM security -->
+<div class="card">
+    <h2>About Private Messages</h2>
+    <p>Private messages in PQPGP forums use <strong>sealed sender</strong> encryption:</p>
+    <ul>
+        <li><strong>Content Privacy:</strong> Only the recipient can read the message</li>
+        <li><strong>Sender Privacy:</strong> The relay cannot determine who sent a message</li>
+        <li><strong>Recipient Privacy:</strong> The relay cannot determine who received a message</li>
+        <li><strong>Forward Secrecy:</strong> Each conversation uses unique keys derived via X3DH</li>
+        <li><strong>Post-Quantum Security:</strong> Uses ML-KEM-1024 for key encapsulation</li>
+    </ul>
+    <p style="color: #718096; font-size: 14px;">
+        Messages are stored encrypted in the forum DAG. Only you and the recipient can decrypt them.
+    </p>
+</div>
+{% endblock %}

@@ -1,0 +1,185 @@
+{% extends "base.html" %}
+
+{% block title %}Private Messages - {{ forum_name }}{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Private Messages - {{ forum_name }}</h2>
+    <p><a href="/forum/{{ forum_hash }}">&larr; Back to Forum</a></p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+</div>
+
+<!-- Encryption Identities -->
+<div class="card">
+    <h2>PM Identities</h2>
+    {% if our_identities.is_empty() %}
+    <p style="color: #718096;">No PM identities created yet. Create one below to start sending private messages.</p>
+    {% else %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Owner</th>
+                <th>Identity ID</th>
+                <th>Prekeys</th>
+                <th>Created</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for identity in our_identities %}
+            <tr>
+                <td><span class="key-id">{{ identity.owner_fingerprint|truncate(16) }}...</span></td>
+                <td><span class="key-id">{{ identity.hash|truncate(16) }}...</span></td>
+                <td>{{ identity.otp_count }}</td>
+                <td>{{ identity.created_at_display }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+
+    <h3 style="margin-top: 1.5em;">Create New PM Identity</h3>
+    <form method="post" action="/forum/{{ forum_hash }}/pm/identity/create">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-group">
+            <label for="signing_key">Signing Key:</label>
+            <select name="signing_key" id="signing_key" required>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.fingerprint }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="password">Key Password (if protected):</label>
+            <input type="password" name="password" id="password" placeholder="Leave empty if not password-protected">
+        </div>
+        <div class="form-group">
+            <label for="otp_count">One-time Prekeys to Generate:</label>
+            <input type="number" name="otp_count" id="otp_count" value="10" min="1" max="100">
+            <small style="color: #718096;">More prekeys = more forward secrecy for initial messages</small>
+        </div>
+        <button type="submit" class="btn">Create PM Identity</button>
+    </form>
+</div>
+
+<!-- Compose New Message -->
+{% if !our_identities.is_empty() %}
+<div class="card">
+    <h2>Compose New Message</h2>
+    {% if recipients.is_empty() %}
+    <p style="color: #718096;">No other users have published encryption identities in this forum yet.</p>
+    {% else %}
+    <form method="post" action="/forum/{{ forum_hash }}/pm/send">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-group">
+            <label for="recipient">Recipient:</label>
+            <select name="recipient" id="recipient" required>
+                {% for r in recipients %}
+                <option value="{{ r.encryption_identity_hash }}">{{ r.fingerprint_short }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="subject">Subject (optional):</label>
+            <input type="text" name="subject" id="subject" maxlength="256" placeholder="Message subject">
+        </div>
+        <div class="form-group">
+            <label for="body">Message:</label>
+            <textarea name="body" id="body" required placeholder="Your private message..." style="height: 150px;"></textarea>
+        </div>
+        <div class="form-group">
+            <label for="signing_key">Sign with Key:</label>
+            <select name="signing_key" id="signing_key_send" required>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.fingerprint }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="password_send">Key Password (if protected):</label>
+            <input type="password" name="password" id="password_send" placeholder="Leave empty if not password-protected">
+        </div>
+        <button type="submit" class="btn">Send Private Message</button>
+    </form>
+    {% endif %}
+</div>
+{% endif %}
+
+<!-- Conversations List -->
+<div class="card">
+    <h2>Conversations</h2>
+    {% if conversations.is_empty() %}
+    <p style="color: #718096;">No conversations yet. Send a message to start one!</p>
+    {% else %}
+    <table class="table">
+        <thead>
+            <tr>
+                <th>Peer</th>
+                <th>Last Message</th>
+                <th>Messages</th>
+                <th>Last Activity</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for conv in conversations %}
+            <tr{% if conv.has_unread %} style="background-color: #f0f9ff;"{% endif %}>
+                <td><span class="key-id">{{ conv.peer_short }}</span></td>
+                <td>{{ conv.last_message_preview }}</td>
+                <td>{{ conv.message_count }}</td>
+                <td>{{ conv.last_activity_display }}</td>
+                <td>
+                    <a href="/forum/{{ forum_hash }}/pm/conversation/{{ conv.id }}" class="btn btn-small">View</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% endif %}
+</div>
+
+<!-- Available Recipients -->
+{% if !our_identities.is_empty() && !recipients.is_empty() %}
+<div class="card">
+    <h2>Forum Members with PM Identities</h2>
+    <table class="table">
+        <thead>
+            <tr>
+                <th>User Fingerprint</th>
+                <th>Identity Hash</th>
+                <th>Actions</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in recipients %}
+            <tr>
+                <td><span class="key-id">{{ r.fingerprint_short }}</span></td>
+                <td><span class="key-id">{{ r.encryption_identity_hash|truncate(16) }}...</span></td>
+                <td>
+                    <a href="/forum/{{ forum_hash }}/pm/compose?to={{ r.encryption_identity_hash }}" class="btn btn-small">Message</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
+<!-- Scan for New Messages -->
+{% if !our_identities.is_empty() %}
+<div class="card">
+    <h2>Sync Messages</h2>
+    <p>Scan the forum for new private messages addressed to you.</p>
+    <form method="post" action="/forum/{{ forum_hash }}/pm/scan">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn">Scan for New Messages</button>
+    </form>
+</div>
+{% endif %}
+{% endblock %}

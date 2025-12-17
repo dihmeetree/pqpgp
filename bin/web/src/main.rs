@@ -30,19 +30,20 @@ use tracing_subscriber::EnvFilter;
 mod chat_state;
 mod csrf;
 mod forum_handlers;
-mod forum_persistence;
+mod rate_limiter;
 mod relay_client;
 mod storage;
 mod templates;
 use chat_state::{create_shared_state_manager, SharedChatStateManager};
 use csrf::{get_csrf_token, validate_csrf_token, CsrfProtectedForm, CsrfStore};
-use forum_persistence::WebForumPersistence;
+use pqpgp::forum::ForumStorage;
+use rate_limiter::PmRateLimiterSet;
 use relay_client::{create_relay_client, SharedRelayClient};
 use storage::ChatStorage;
 use templates::{FilesTemplate, SigningKeyInfo, *};
 
 /// Shared forum persistence for local DAG storage.
-pub type SharedForumPersistence = Arc<WebForumPersistence>;
+pub type SharedForumPersistence = Arc<ForumStorage>;
 
 /// Default forum sync interval in seconds.
 const FORUM_SYNC_INTERVAL_SECS: u64 = 30;
@@ -130,6 +131,8 @@ pub struct AppState {
     pub relay_client: SharedRelayClient,
     /// Forum persistence for local DAG storage
     pub forum_persistence: SharedForumPersistence,
+    /// Rate limiters for PM operations (DoS prevention)
+    pub pm_rate_limiters: PmRateLimiterSet,
 }
 
 impl std::fmt::Debug for AppState {
@@ -139,6 +142,7 @@ impl std::fmt::Debug for AppState {
             .field("chat_states", &"SharedChatStateManager { ... }")
             .field("relay_client", &"SharedRelayClient { ... }")
             .field("forum_persistence", &"SharedForumPersistence { ... }")
+            .field("pm_rate_limiters", &"PmRateLimiterSet { ... }")
             .finish()
     }
 }
@@ -224,8 +228,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let forum_data_path =
         std::env::var("PQPGP_FORUM_DATA").unwrap_or_else(|_| "pqpgp_web_forum_data".to_string());
     let forum_persistence = Arc::new(
-        WebForumPersistence::with_data_dir(&forum_data_path)
-            .expect("Failed to initialize forum persistence"),
+        ForumStorage::new(&forum_data_path).expect("Failed to initialize forum persistence"),
     );
     info!("Forum data stored in: {}", forum_data_path);
 
@@ -234,6 +237,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         chat_states,
         relay_client,
         forum_persistence: forum_persistence.clone(),
+        pm_rate_limiters: PmRateLimiterSet::default(),
     };
 
     // Set up session management
@@ -349,6 +353,32 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .route(
             "/forum/:forum_hash/board/:board_hash/unhide",
             post(forum_handlers::unhide_board_handler),
+        )
+        // Private message routes
+        .route("/forum/:forum_hash/pm", get(forum_handlers::pm_inbox_page))
+        .route(
+            "/forum/:forum_hash/pm/identity/create",
+            post(forum_handlers::create_encryption_identity_handler),
+        )
+        .route(
+            "/forum/:forum_hash/pm/send",
+            post(forum_handlers::send_pm_handler),
+        )
+        .route(
+            "/forum/:forum_hash/pm/scan",
+            post(forum_handlers::scan_pm_handler),
+        )
+        .route(
+            "/forum/:forum_hash/pm/compose",
+            get(forum_handlers::pm_compose_page),
+        )
+        .route(
+            "/forum/:forum_hash/pm/conversation/:conversation_id",
+            get(forum_handlers::pm_conversation_page),
+        )
+        .route(
+            "/forum/:forum_hash/pm/conversation/:conversation_id/reply",
+            post(forum_handlers::reply_pm_handler),
         )
         .nest_service("/static", ServeDir::new("src/web/static"))
         .layer(session_layer)

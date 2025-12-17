@@ -4,15 +4,17 @@
 //! a web interface for viewing and participating in forums.
 
 use crate::csrf::{get_csrf_token, validate_csrf_token, CsrfProtectedForm};
-use crate::forum_persistence::ForumMetadata;
 use crate::templates::{
-    BoardDisplayInfo, BoardViewTemplate, ForumDisplayInfo, ForumListTemplate, ForumViewTemplate,
-    ModeratorDisplayInfo, PostDisplayInfo, SigningKeyInfo, ThreadDisplayInfo, ThreadViewTemplate,
+    BoardDisplayInfo, BoardViewTemplate, ConversationInfo, EncryptionIdentityInfo,
+    ForumDisplayInfo, ForumListTemplate, ForumViewTemplate, ModeratorDisplayInfo,
+    PMComposeTemplate, PMConversationTemplate, PMInboxTemplate, PMRecipientInfo, PostDisplayInfo,
+    PrivateMessageInfo, SigningKeyInfo, ThreadDisplayInfo, ThreadViewTemplate,
 };
 use crate::AppState;
 use crate::SharedForumPersistence;
+use askama::Template;
 use axum::{
-    extract::{Form, Path, State},
+    extract::{Form, Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect},
 };
@@ -20,10 +22,13 @@ use pqpgp::cli::utils::create_keyring_manager;
 use pqpgp::crypto::Password;
 use pqpgp::forum::{
     permissions::ForumPermissions,
+    seal_private_message,
     types::current_timestamp_millis,
     validation::{validate_node, ValidationContext},
-    BoardGenesis, ContentHash, DagNode, EditNode, FetchNodesRequest, ForumGenesis, ModAction,
-    ModActionNode, Post, SyncRequest, SyncResponse, ThreadRoot,
+    BoardGenesis, ContentHash, ConversationManager, ConversationSession, DagNode, EditNode,
+    EncryptionIdentity, EncryptionIdentityGenerator, FetchNodesRequest, ForumGenesis,
+    ForumMetadata, InnerMessage, ModAction, ModActionNode, Post, PrivateMessageScanner,
+    SealedPrivateMessage, StoredMessage, SyncRequest, SyncResponse, ThreadRoot,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -214,7 +219,9 @@ async fn sync_forum_with_depth(
     let relay_url = get_relay_url();
 
     // Step 1: Build sync request with known heads
-    let known_heads = persistence.get_heads(forum_hash)?;
+    let known_heads = persistence
+        .get_heads(forum_hash)
+        .map_err(|e| e.to_string())?;
     let sync_request = SyncRequest::with_heads(*forum_hash, known_heads.into_iter().collect());
 
     info!(
@@ -248,7 +255,9 @@ async fn sync_forum_with_depth(
     if nodes_to_fetch.is_empty() {
         info!("Forum {} is already up to date", forum_hash.short());
         // Only update heads with hashes that exist locally (security: don't trust relay blindly)
-        let local_nodes = persistence.load_forum_nodes(forum_hash)?;
+        let local_nodes = persistence
+            .load_forum_nodes(forum_hash)
+            .map_err(|e| e.to_string())?;
         let local_hashes: HashSet<ContentHash> = local_nodes.iter().map(|n| *n.hash()).collect();
         let verified_heads: HashSet<ContentHash> = sync_response
             .server_heads
@@ -256,7 +265,9 @@ async fn sync_forum_with_depth(
             .filter(|h| local_hashes.contains(h))
             .collect();
         if !verified_heads.is_empty() {
-            persistence.set_heads(forum_hash, &verified_heads)?;
+            persistence
+                .set_heads(forum_hash, &verified_heads)
+                .map_err(|e| e.to_string())?;
         }
         return Ok(0);
     }
@@ -318,10 +329,15 @@ async fn sync_forum_with_depth(
         DagNode::Post(_) => (3, n.created_at()),
         DagNode::ModAction(_) => (3, n.created_at()),
         DagNode::Edit(_) => (4, n.created_at()),
+        // PM nodes come after regular forum content
+        DagNode::EncryptionIdentity(_) => (5, n.created_at()),
+        DagNode::SealedPrivateMessage(_) => (6, n.created_at()),
     });
 
     // Load existing nodes from local storage for validation context
-    let existing_nodes = persistence.load_forum_nodes(forum_hash)?;
+    let existing_nodes = persistence
+        .load_forum_nodes(forum_hash)
+        .map_err(|e| e.to_string())?;
     let mut nodes_map: HashMap<ContentHash, DagNode> =
         existing_nodes.into_iter().map(|n| (*n.hash(), n)).collect();
 
@@ -377,7 +393,9 @@ async fn sync_forum_with_depth(
         }
 
         // Store the validated node
-        persistence.store_node(forum_hash, &node)?;
+        persistence
+            .store_node_for_forum(forum_hash, &node)
+            .map_err(|e| e.to_string())?;
 
         // If this is a forum genesis, store metadata and initialize permissions
         if let Some(genesis) = node.as_forum_genesis() {
@@ -387,7 +405,9 @@ async fn sync_forum_with_depth(
                 created_at: genesis.created_at(),
                 owner_identity: genesis.creator_identity().to_vec(),
             };
-            persistence.store_forum_metadata(forum_hash, &metadata)?;
+            persistence
+                .store_forum_metadata(forum_hash, &metadata)
+                .map_err(|e| e.to_string())?;
 
             // Initialize permissions from genesis
             permissions_map.insert(*forum_hash, ForumPermissions::from_genesis(genesis));
@@ -422,7 +442,9 @@ async fn sync_forum_with_depth(
         .collect();
 
     if !verified_heads.is_empty() {
-        persistence.set_heads(forum_hash, &verified_heads)?;
+        persistence
+            .set_heads(forum_hash, &verified_heads)
+            .map_err(|e| e.to_string())?;
     }
 
     info!(
@@ -814,8 +836,34 @@ pub async fn create_forum_handler(
         }
     };
 
-    // Serialize and encode
+    let forum_hash = *genesis.hash();
+
+    // Store locally first
+    let metadata = ForumMetadata {
+        name: genesis.name().to_string(),
+        description: genesis.description().to_string(),
+        created_at: genesis.created_at(),
+        owner_identity: genesis.creator_identity().to_vec(),
+    };
+
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_forum_metadata(&forum_hash, &metadata)
+    {
+        error!("Failed to store forum metadata locally: {}", e);
+        return Redirect::to("/forum").into_response();
+    }
+
     let node = DagNode::from(genesis);
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_node_for_forum(&forum_hash, &node)
+    {
+        error!("Failed to store forum node locally: {}", e);
+        return Redirect::to("/forum").into_response();
+    }
+
+    // Serialize and encode for relay
     let node_bytes = match node.to_bytes() {
         Ok(b) => b,
         Err(e) => {
@@ -1699,7 +1747,7 @@ async fn submit_node(persistence: &SharedForumPersistence, forum_hash: &str, nod
     }
 
     // Step 2: Store locally (validation passed)
-    if let Err(e) = persistence.store_node(&forum_content_hash, &node) {
+    if let Err(e) = persistence.store_node_for_forum(&forum_content_hash, &node) {
         warn!("Failed to store node locally: {}", e);
     } else {
         // Update local heads
@@ -3349,6 +3397,1209 @@ pub async fn join_forum_handler(
             error!("Failed to sync forum {}: {}", forum_hash.short(), e);
             // Still redirect to forum page - relay might have data even if sync failed
             Redirect::to(&format!("/forum/{}", forum_hash_str)).into_response()
+        }
+    }
+}
+
+// =============================================================================
+// Private Message Handlers
+// =============================================================================
+
+/// Maximum PM body size (64KB).
+const MAX_PM_BODY_SIZE: usize = 64 * 1024;
+
+/// Maximum PM subject size (256 bytes).
+const MAX_PM_SUBJECT_SIZE: usize = 256;
+
+/// Form data for creating encryption identity.
+#[derive(Debug, Deserialize)]
+pub struct CreateEncryptionIdentityForm {
+    pub csrf_token: String,
+    pub signing_key: String,
+    /// Password for decrypting the signing key if protected.
+    pub password: Option<String>,
+    pub otp_count: Option<u32>,
+}
+
+/// Form data for sending a private message.
+#[derive(Debug, Deserialize)]
+pub struct SendPMForm {
+    pub csrf_token: String,
+    pub recipient: String,
+    pub subject: Option<String>,
+    pub body: String,
+    /// Signing key field for future signature support.
+    #[allow(dead_code)]
+    pub signing_key: String,
+    /// Password field for future key decryption support.
+    #[allow(dead_code)]
+    pub password: Option<String>,
+}
+
+/// Form data for replying to a conversation.
+#[derive(Debug, Deserialize)]
+pub struct ReplyPMForm {
+    pub csrf_token: String,
+    pub subject: Option<String>,
+    pub body: String,
+    pub reply_to: Option<String>,
+    /// Signing key field for future signature support.
+    #[allow(dead_code)]
+    pub signing_key: String,
+    /// Password field for future key decryption support.
+    #[allow(dead_code)]
+    pub password: Option<String>,
+}
+
+/// Form data for scanning PMs.
+#[derive(Debug, Deserialize)]
+pub struct ScanPMForm {
+    pub csrf_token: String,
+}
+
+/// Query params for compose page.
+#[derive(Debug, Deserialize)]
+pub struct ComposeQuery {
+    pub to: Option<String>,
+}
+
+/// Helper to format timestamp for display.
+fn format_timestamp_display(millis: u64) -> String {
+    use std::time::{Duration, UNIX_EPOCH};
+    let dt = UNIX_EPOCH + Duration::from_millis(millis);
+    // Simple formatting - just show relative time or date
+    let now = std::time::SystemTime::now();
+    let age = now.duration_since(dt).unwrap_or_default();
+
+    if age.as_secs() < 60 {
+        "Just now".to_string()
+    } else if age.as_secs() < 3600 {
+        format!("{} minutes ago", age.as_secs() / 60)
+    } else if age.as_secs() < 86400 {
+        format!("{} hours ago", age.as_secs() / 3600)
+    } else {
+        format!("{} days ago", age.as_secs() / 86400)
+    }
+}
+
+/// Helper to get all encryption identities in a forum.
+fn get_forum_encryption_identities(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+) -> Vec<(ContentHash, EncryptionIdentity)> {
+    let mut identities = Vec::new();
+
+    if let Ok(hashes) = persistence.list_encryption_identities(forum_hash) {
+        for hash in hashes {
+            if let Ok(Some(DagNode::EncryptionIdentity(ei))) =
+                persistence.load_node(forum_hash, &hash)
+            {
+                identities.push((hash, ei));
+            }
+        }
+    }
+
+    identities
+}
+
+/// Helper to find our encryption identity (if we have one).
+fn find_our_encryption_identity(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+    our_fingerprints: &[String],
+) -> Option<(ContentHash, EncryptionIdentity)> {
+    let identities = get_forum_encryption_identities(persistence, forum_hash);
+
+    for (hash, identity) in identities {
+        let owner_fp = fingerprint_from_identity(&identity.content.owner_signing_key);
+        if our_fingerprints.contains(&owner_fp) {
+            return Some((hash, identity));
+        }
+    }
+
+    None
+}
+
+/// PM Inbox page handler.
+pub async fn pm_inbox_page(
+    Path(forum_hash_str): Path<String>,
+    State(app_state): State<AppState>,
+    session: Session,
+) -> impl IntoResponse {
+    let csrf_token = get_csrf_token(&session, &app_state.csrf_store)
+        .await
+        .unwrap_or_default();
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Html(
+                "<html><body><h1>Invalid forum hash</h1><a href='/forum'>Back</a></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    // Get forum name
+    let forum_name = app_state
+        .forum_persistence
+        .get_effective_forum_info(&forum_hash)
+        .ok()
+        .flatten()
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| "Unknown Forum".to_string());
+
+    // Get signing keys
+    let signing_keys = get_signing_keys();
+    let our_fingerprints: Vec<String> =
+        signing_keys.iter().map(|k| k.fingerprint.clone()).collect();
+
+    // Get all encryption identities in this forum
+    let all_identities = get_forum_encryption_identities(&app_state.forum_persistence, &forum_hash);
+
+    // Find all our encryption identities (ones that match our signing keys)
+    let our_identities: Vec<EncryptionIdentityInfo> = all_identities
+        .iter()
+        .filter_map(|(hash, identity)| {
+            let fp = fingerprint_from_identity(&identity.content.owner_signing_key);
+            if our_fingerprints.contains(&fp) {
+                Some(EncryptionIdentityInfo {
+                    hash: hash.to_hex(),
+                    owner_fingerprint: fp,
+                    otp_count: identity.content.one_time_prekeys.len(),
+                    created_at_display: format_timestamp_display(identity.content.created_at),
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Get recipients (all identities, for testing we include our own too)
+    let recipients: Vec<PMRecipientInfo> = all_identities
+        .iter()
+        .map(|(hash, identity)| {
+            let fp = fingerprint_from_identity(&identity.content.owner_signing_key);
+            PMRecipientInfo {
+                fingerprint: fp.clone(),
+                fingerprint_short: format!("{}...", &fp[..16.min(fp.len())]),
+                encryption_identity_hash: hash.to_hex(),
+            }
+        })
+        .collect();
+
+    // Load conversation manager to get conversations
+    let conversations = match app_state.forum_persistence.load_conversation_manager() {
+        Ok(manager) => {
+            manager
+                .all_sessions()
+                .map(|conv_session| {
+                    let id = hex::encode(conv_session.conversation_id().as_bytes());
+                    let peer_fp = conv_session.peer_identity_hash().to_hex();
+                    ConversationInfo {
+                        id: id.clone(),
+                        id_short: format!("{}...", &id[..16.min(id.len())]),
+                        peer_fingerprint: peer_fp.clone(),
+                        peer_short: format!("{}...", &peer_fp[..16.min(peer_fp.len())]),
+                        last_message_preview: "...".to_string(), // TODO: Get from message history
+                        last_activity_display: format_timestamp_display(
+                            conv_session.last_activity(),
+                        ),
+                        message_count: (conv_session.messages_sent()
+                            + conv_session.messages_received())
+                            as usize,
+                        has_unread: false, // TODO: Track unread status
+                    }
+                })
+                .collect()
+        }
+        _ => Vec::new(),
+    };
+
+    let template = PMInboxTemplate {
+        active_page: "forum".to_string(),
+        csrf_token,
+        forum_hash: forum_hash_str,
+        forum_name,
+        our_identities,
+        conversations,
+        recipients,
+        signing_keys,
+        result: None,
+        error: None,
+        has_result: false,
+        has_error: false,
+    };
+
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
+    )
+    .into_response()
+}
+
+/// Create encryption identity handler.
+pub async fn create_encryption_identity_handler(
+    Path(forum_hash_str): Path<String>,
+    State(app_state): State<AppState>,
+    session: Session,
+    Form(form): Form<CreateEncryptionIdentityForm>,
+) -> impl IntoResponse {
+    // Validate CSRF
+    if !validate_csrf_token(&session, &app_state.csrf_store, &form.csrf_token) {
+        return Redirect::to(&format!("/forum/{}/pm?error=invalid_csrf", forum_hash_str))
+            .into_response();
+    }
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Redirect::to("/forum?error=invalid_hash").into_response();
+        }
+    };
+
+    // SECURITY: Rate limit identity creation to prevent prekey bundle spam
+    let rate_limit_key = format!("{}:{}", forum_hash_str, form.signing_key);
+    if !app_state
+        .pm_rate_limiters
+        .identity_creation
+        .check_and_record(&rate_limit_key)
+    {
+        warn!("Rate limited identity creation for {}", rate_limit_key);
+        return Redirect::to(&format!("/forum/{}/pm?error=rate_limited", forum_hash_str))
+            .into_response();
+    }
+
+    // Validate inputs
+    if form.signing_key.len() > MAX_HASH_INPUT_SIZE {
+        return Redirect::to(&format!("/forum/{}/pm?error=invalid_key", forum_hash_str))
+            .into_response();
+    }
+
+    let otp_count = form.otp_count.unwrap_or(10).clamp(1, 100) as usize;
+
+    // Load signing key using the standard pattern
+    let signing_materials = match get_signing_materials(&form.signing_key) {
+        Ok(m) => m,
+        Err(e) => {
+            error!("Failed to get signing materials: {}", e);
+            return Redirect::to(&format!("/forum/{}/pm?error=key_error", forum_hash_str))
+                .into_response();
+        }
+    };
+
+    let public_key = signing_materials.public_key;
+    let private_key = signing_materials.private_key;
+
+    // Prepare password if provided
+    let password = form
+        .password
+        .as_ref()
+        .filter(|p| !p.is_empty())
+        .map(|p| Password::new(p.clone()));
+
+    // Generate encryption identity
+    let (identity, private_data) = match EncryptionIdentityGenerator::generate(
+        forum_hash,
+        &public_key,
+        &private_key,
+        otp_count,
+        password.as_ref(),
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Failed to generate encryption identity: {}", e);
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=generation_failed",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Store the private data locally
+    let identity_hash = *identity.hash();
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_encryption_private(&identity_hash, &private_data)
+    {
+        error!("Failed to store encryption private key: {}", e);
+        return Redirect::to(&format!(
+            "/forum/{}/pm?error=storage_failed",
+            forum_hash_str
+        ))
+        .into_response();
+    }
+
+    // Store the identity node locally
+    let node = DagNode::EncryptionIdentity(identity);
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_node_for_forum(&forum_hash, &node)
+    {
+        error!("Failed to store encryption identity node: {}", e);
+        return Redirect::to(&format!(
+            "/forum/{}/pm?error=storage_failed",
+            forum_hash_str
+        ))
+        .into_response();
+    }
+
+    // Submit to relay
+    let client = Client::new();
+    let relay_url = get_relay_url();
+
+    let request = match pqpgp::forum::SubmitNodeRequest::new(forum_hash, &node) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to create submit request: {}", e);
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=serialization_failed",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    match client
+        .post(format!("{}/forums/nodes/submit", relay_url))
+        .json(&request)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            info!(
+                "Created encryption identity for forum {}",
+                forum_hash.short()
+            );
+            Redirect::to(&format!(
+                "/forum/{}/pm?result=identity_created",
+                forum_hash_str
+            ))
+            .into_response()
+        }
+        Ok(response) => {
+            warn!(
+                "Relay rejected encryption identity: {:?}",
+                response.status()
+            );
+            Redirect::to(&format!(
+                "/forum/{}/pm?error=relay_rejected",
+                forum_hash_str
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            error!("Failed to submit to relay: {}", e);
+            Redirect::to(&format!("/forum/{}/pm?error=relay_error", forum_hash_str)).into_response()
+        }
+    }
+}
+
+/// Send private message handler.
+pub async fn send_pm_handler(
+    Path(forum_hash_str): Path<String>,
+    State(app_state): State<AppState>,
+    session: Session,
+    Form(form): Form<SendPMForm>,
+) -> impl IntoResponse {
+    // Validate CSRF
+    if !validate_csrf_token(&session, &app_state.csrf_store, &form.csrf_token) {
+        return Redirect::to(&format!("/forum/{}/pm?error=invalid_csrf", forum_hash_str))
+            .into_response();
+    }
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Redirect::to("/forum?error=invalid_hash").into_response();
+        }
+    };
+
+    // SECURITY: Rate limit message sending to prevent spam flooding
+    let rate_limit_key = format!("{}:{}", forum_hash_str, form.signing_key);
+    if !app_state
+        .pm_rate_limiters
+        .message_send
+        .check_and_record(&rate_limit_key)
+    {
+        warn!("Rate limited message send for {}", rate_limit_key);
+        return Redirect::to(&format!("/forum/{}/pm?error=rate_limited", forum_hash_str))
+            .into_response();
+    }
+
+    // Validate inputs
+    if form.body.is_empty() || form.body.len() > MAX_PM_BODY_SIZE {
+        return Redirect::to(&format!("/forum/{}/pm?error=invalid_body", forum_hash_str))
+            .into_response();
+    }
+
+    if let Some(ref subject) = form.subject {
+        if subject.len() > MAX_PM_SUBJECT_SIZE {
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=invalid_subject",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    }
+
+    // Parse recipient encryption identity hash
+    let recipient_hash = match ContentHash::from_hex(&form.recipient) {
+        Ok(h) => h,
+        Err(_) => {
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=invalid_recipient",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Load recipient's encryption identity
+    let recipient_identity = match app_state
+        .forum_persistence
+        .load_node(&forum_hash, &recipient_hash)
+    {
+        Ok(Some(DagNode::EncryptionIdentity(ei))) => ei,
+        _ => {
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=recipient_not_found",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Get our signing keys to find our encryption identity
+    let signing_keys = get_signing_keys();
+    let our_fingerprints: Vec<String> =
+        signing_keys.iter().map(|k| k.fingerprint.clone()).collect();
+
+    let (our_identity_hash, our_identity) = match find_our_encryption_identity(
+        &app_state.forum_persistence,
+        &forum_hash,
+        &our_fingerprints,
+    ) {
+        Some(result) => result,
+        None => {
+            return Redirect::to(&format!("/forum/{}/pm?error=no_identity", forum_hash_str))
+                .into_response();
+        }
+    };
+
+    // Create inner message
+    let conversation_seed = [0u8; 32]; // Will be overridden by seal function
+    let mut inner = InnerMessage::new(conversation_seed, form.body.clone());
+    if let Some(ref subject) = form.subject {
+        if !subject.is_empty() {
+            inner = inner.with_subject(subject.clone());
+        }
+    }
+    let inner_for_storage = inner.clone();
+
+    // Seal the message
+    let sealed_result = match seal_private_message(
+        forum_hash,
+        &our_identity,
+        &recipient_identity,
+        inner,
+        true, // Use one-time prekey
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Failed to seal private message: {}", e);
+            return Redirect::to(&format!("/forum/{}/pm?error=seal_failed", forum_hash_str))
+                .into_response();
+        }
+    };
+
+    // Store the sealed message locally
+    let node = DagNode::SealedPrivateMessage(sealed_result.message.clone());
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_node_for_forum(&forum_hash, &node)
+    {
+        error!("Failed to store sealed message: {}", e);
+        return Redirect::to(&format!(
+            "/forum/{}/pm?error=storage_failed",
+            forum_hash_str
+        ))
+        .into_response();
+    }
+
+    // Submit to relay
+    let client = Client::new();
+    let relay_url = get_relay_url();
+
+    let request = match pqpgp::forum::SubmitNodeRequest::new(forum_hash, &node) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to create submit request: {}", e);
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=serialization_failed",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    match client
+        .post(format!("{}/forums/nodes/submit", relay_url))
+        .json(&request)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            info!("Sent private message in forum {}", forum_hash.short());
+
+            // Create conversation session locally
+            let mut conversation_manager = app_state
+                .forum_persistence
+                .load_conversation_manager()
+                .unwrap_or_else(|_| ConversationManager::new());
+
+            // Check if session already exists, if not create it
+            let conv_id_bytes = sealed_result.conversation_id;
+            if conversation_manager.get_session(&conv_id_bytes).is_none() {
+                // Get the recipient's signed prekey for Double Ratchet initialization
+                let peer_ratchet_key = Some(recipient_identity.content.signed_prekey.clone());
+                let session = ConversationSession::new_initiator(
+                    conv_id_bytes,
+                    *sealed_result.conversation_key,
+                    our_identity_hash,
+                    recipient_hash,
+                    None, // OTP consumption tracked separately
+                    peer_ratchet_key,
+                );
+                if let Err(e) = conversation_manager.add_session(session) {
+                    warn!("Failed to add conversation session: {}", e);
+                }
+            }
+
+            // Record sent and store the message
+            if let Some(session) = conversation_manager.get_session_mut(&conv_id_bytes) {
+                session.record_sent();
+            }
+
+            // Store the message in history
+            let stored_msg = StoredMessage {
+                inner: inner_for_storage,
+                dag_hash: *node.hash(),
+                is_outgoing: true,
+                processed_at: current_timestamp_millis(),
+            };
+            if let Err(e) = conversation_manager.store_message(&conv_id_bytes, stored_msg) {
+                warn!("Failed to store message in history: {}", e);
+            }
+
+            // Save conversation manager
+            if let Err(e) = app_state
+                .forum_persistence
+                .store_conversation_manager(&conversation_manager)
+            {
+                warn!("Failed to save conversation manager: {}", e);
+            }
+
+            Redirect::to(&format!("/forum/{}/pm?result=message_sent", forum_hash_str))
+                .into_response()
+        }
+        Ok(response) => {
+            warn!("Relay rejected sealed message: {:?}", response.status());
+            Redirect::to(&format!(
+                "/forum/{}/pm?error=relay_rejected",
+                forum_hash_str
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            error!("Failed to submit to relay: {}", e);
+            Redirect::to(&format!("/forum/{}/pm?error=relay_error", forum_hash_str)).into_response()
+        }
+    }
+}
+
+/// Scan for new private messages handler.
+pub async fn scan_pm_handler(
+    Path(forum_hash_str): Path<String>,
+    State(app_state): State<AppState>,
+    session: Session,
+    Form(form): Form<ScanPMForm>,
+) -> impl IntoResponse {
+    // Validate CSRF
+    if !validate_csrf_token(&session, &app_state.csrf_store, &form.csrf_token) {
+        return Redirect::to(&format!("/forum/{}/pm?error=invalid_csrf", forum_hash_str))
+            .into_response();
+    }
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Redirect::to("/forum?error=invalid_hash").into_response();
+        }
+    };
+
+    // SECURITY: Rate limit scanning to prevent resource exhaustion
+    // Use forum hash as key since scanning is per-forum
+    if !app_state
+        .pm_rate_limiters
+        .message_scan
+        .check_and_record(&forum_hash_str)
+    {
+        warn!("Rate limited message scan for forum {}", forum_hash_str);
+        return Redirect::to(&format!("/forum/{}/pm?error=rate_limited", forum_hash_str))
+            .into_response();
+    }
+
+    // Load our encryption private keys
+    let private_hashes = match app_state.forum_persistence.list_encryption_privates() {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to list encryption privates: {}", e);
+            return Redirect::to(&format!("/forum/{}/pm?error=storage_error", forum_hash_str))
+                .into_response();
+        }
+    };
+
+    if private_hashes.is_empty() {
+        return Redirect::to(&format!("/forum/{}/pm?error=no_identity", forum_hash_str))
+            .into_response();
+    }
+
+    // Load private keys
+    let mut privates = Vec::new();
+    for hash in &private_hashes {
+        if let Ok(Some(private)) = app_state.forum_persistence.load_encryption_private(hash) {
+            privates.push(private);
+        }
+    }
+
+    if privates.is_empty() {
+        return Redirect::to(&format!("/forum/{}/pm?error=no_identity", forum_hash_str))
+            .into_response();
+    }
+
+    // Load conversation manager
+    let conversation_manager = app_state
+        .forum_persistence
+        .load_conversation_manager()
+        .unwrap_or_else(|_| ConversationManager::new());
+
+    // Load all sealed messages from storage
+    let sealed_hashes = match app_state
+        .forum_persistence
+        .list_sealed_messages(&forum_hash)
+    {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to list sealed messages: {}", e);
+            return Redirect::to(&format!("/forum/{}/pm?error=storage_error", forum_hash_str))
+                .into_response();
+        }
+    };
+
+    // Load sealed messages
+    let mut sealed_messages: Vec<(ContentHash, SealedPrivateMessage)> = Vec::new();
+    for hash in sealed_hashes {
+        if let Ok(Some(DagNode::SealedPrivateMessage(msg))) =
+            app_state.forum_persistence.load_node(&forum_hash, &hash)
+        {
+            sealed_messages.push((hash, msg));
+        }
+    }
+
+    // Create scanner and scan
+    let private_refs: Vec<_> = privates.iter().collect();
+    let mut scanner = PrivateMessageScanner::new(private_refs);
+
+    let messages_iter = sealed_messages.iter().map(|(h, m)| (h, m));
+    let scan_result = scanner.scan_messages(messages_iter, &conversation_manager);
+
+    // Save updated conversation manager
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_conversation_manager(&conversation_manager)
+    {
+        warn!("Failed to save conversation manager: {}", e);
+    }
+
+    info!(
+        "PM scan complete: scanned={}, decrypted={}, new_conversations={}",
+        scan_result.messages_scanned, scan_result.messages_decrypted, scan_result.new_conversations
+    );
+
+    Redirect::to(&format!(
+        "/forum/{}/pm?result=scanned_{}_decrypted_{}",
+        forum_hash_str, scan_result.messages_scanned, scan_result.messages_decrypted
+    ))
+    .into_response()
+}
+
+/// Compose new PM page handler.
+pub async fn pm_compose_page(
+    Path(forum_hash_str): Path<String>,
+    Query(query): Query<ComposeQuery>,
+    State(app_state): State<AppState>,
+    session: Session,
+) -> impl IntoResponse {
+    let csrf_token = get_csrf_token(&session, &app_state.csrf_store)
+        .await
+        .unwrap_or_default();
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Html(
+                "<html><body><h1>Invalid forum hash</h1><a href='/forum'>Back</a></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    // Get forum name
+    let forum_name = app_state
+        .forum_persistence
+        .get_effective_forum_info(&forum_hash)
+        .ok()
+        .flatten()
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| "Unknown Forum".to_string());
+
+    // Get signing keys
+    let signing_keys = get_signing_keys();
+    let our_fingerprints: Vec<String> =
+        signing_keys.iter().map(|k| k.fingerprint.clone()).collect();
+
+    // Find our encryption identity
+    let our_identity =
+        find_our_encryption_identity(&app_state.forum_persistence, &forum_hash, &our_fingerprints)
+            .map(|(hash, identity)| EncryptionIdentityInfo {
+                hash: hash.to_hex(),
+                owner_fingerprint: fingerprint_from_identity(&identity.content.owner_signing_key),
+                otp_count: identity.content.one_time_prekeys.len(),
+                created_at_display: format_timestamp_display(identity.content.created_at),
+            });
+
+    // Get all encryption identities for recipients (excluding ours)
+    let all_identities = get_forum_encryption_identities(&app_state.forum_persistence, &forum_hash);
+    let recipients: Vec<PMRecipientInfo> = all_identities
+        .iter()
+        .filter_map(|(hash, identity)| {
+            let fp = fingerprint_from_identity(&identity.content.owner_signing_key);
+            if our_fingerprints.contains(&fp) {
+                None
+            } else {
+                Some(PMRecipientInfo {
+                    fingerprint: fp.clone(),
+                    fingerprint_short: format!("{}...", &fp[..16.min(fp.len())]),
+                    encryption_identity_hash: hash.to_hex(),
+                })
+            }
+        })
+        .collect();
+
+    // Pre-select recipient if specified in query
+    let recipient = query.to.as_ref().and_then(|to_hash| {
+        recipients
+            .iter()
+            .find(|r| r.encryption_identity_hash == *to_hash)
+            .cloned()
+    });
+
+    let template = PMComposeTemplate {
+        active_page: "forum".to_string(),
+        csrf_token,
+        forum_hash: forum_hash_str,
+        forum_name,
+        recipient,
+        recipients,
+        our_identity,
+        signing_keys,
+        result: None,
+        error: None,
+        has_result: false,
+        has_error: false,
+    };
+
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
+    )
+    .into_response()
+}
+
+/// View conversation page handler.
+pub async fn pm_conversation_page(
+    Path((forum_hash_str, conversation_id_str)): Path<(String, String)>,
+    State(app_state): State<AppState>,
+    session: Session,
+) -> impl IntoResponse {
+    let csrf_token = get_csrf_token(&session, &app_state.csrf_store)
+        .await
+        .unwrap_or_default();
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Html(
+                "<html><body><h1>Invalid forum hash</h1><a href='/forum'>Back</a></body></html>"
+                    .to_string(),
+            )
+            .into_response();
+        }
+    };
+
+    // Parse conversation ID
+    let conversation_id: [u8; 32] = match hex::decode(&conversation_id_str) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return Html(format!(
+                "<html><body><h1>Invalid conversation ID</h1><a href='/forum/{}/pm'>Back</a></body></html>",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Get forum name
+    let forum_name = app_state
+        .forum_persistence
+        .get_effective_forum_info(&forum_hash)
+        .ok()
+        .flatten()
+        .map(|(name, _)| name)
+        .unwrap_or_else(|| "Unknown Forum".to_string());
+
+    // Load conversation manager
+    let conversation_manager = match app_state.forum_persistence.load_conversation_manager() {
+        Ok(manager) => manager,
+        _ => {
+            return Html(format!(
+                "<html><body><h1>Conversation not found</h1><a href='/forum/{}/pm'>Back</a></body></html>",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Get conversation session
+    let session_data = match conversation_manager.get_session(&conversation_id) {
+        Some(s) => s,
+        None => {
+            return Html(format!(
+                "<html><body><h1>Conversation not found</h1><a href='/forum/{}/pm'>Back</a></body></html>",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    let peer_fp = session_data.peer_identity_hash().to_hex();
+
+    // Get messages
+    let messages: Vec<PrivateMessageInfo> = conversation_manager
+        .get_messages(&conversation_id)
+        .map(|msgs| {
+            msgs.iter()
+                .map(|m| PrivateMessageInfo {
+                    message_id: hex::encode(m.inner.message_id),
+                    body: m.inner.body.clone(),
+                    subject: m.inner.subject.clone(),
+                    is_outgoing: m.is_outgoing,
+                    timestamp_display: format_timestamp_display(m.processed_at),
+                    reply_to: m.inner.reply_to.map(hex::encode),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let signing_keys = get_signing_keys();
+
+    let template = PMConversationTemplate {
+        active_page: "forum".to_string(),
+        csrf_token,
+        forum_hash: forum_hash_str,
+        forum_name,
+        conversation_id: conversation_id_str,
+        peer_fingerprint: peer_fp.clone(),
+        peer_short: format!("{}...", &peer_fp[..16.min(peer_fp.len())]),
+        messages,
+        signing_keys,
+        result: None,
+        error: None,
+        has_result: false,
+        has_error: false,
+    };
+
+    Html(
+        template
+            .render()
+            .unwrap_or_else(|e| format!("Template error: {}", e)),
+    )
+    .into_response()
+}
+
+/// Reply to conversation handler.
+pub async fn reply_pm_handler(
+    Path((forum_hash_str, conversation_id_str)): Path<(String, String)>,
+    State(app_state): State<AppState>,
+    session: Session,
+    Form(form): Form<ReplyPMForm>,
+) -> impl IntoResponse {
+    // Validate CSRF
+    if !validate_csrf_token(&session, &app_state.csrf_store, &form.csrf_token) {
+        return Redirect::to(&format!(
+            "/forum/{}/pm/conversation/{}?error=invalid_csrf",
+            forum_hash_str, conversation_id_str
+        ))
+        .into_response();
+    }
+
+    // Parse forum hash
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return Redirect::to("/forum?error=invalid_hash").into_response();
+        }
+    };
+
+    // Parse conversation ID
+    let conversation_id: [u8; 32] = match hex::decode(&conversation_id_str) {
+        Ok(bytes) if bytes.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            arr
+        }
+        _ => {
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=invalid_conversation",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Validate inputs
+    if form.body.is_empty() || form.body.len() > MAX_PM_BODY_SIZE {
+        return Redirect::to(&format!(
+            "/forum/{}/pm/conversation/{}?error=invalid_body",
+            forum_hash_str, conversation_id_str
+        ))
+        .into_response();
+    }
+
+    // Load conversation manager to get peer info
+    let conversation_manager = match app_state.forum_persistence.load_conversation_manager() {
+        Ok(manager) => manager,
+        _ => {
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=conversation_not_found",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    let session_data = match conversation_manager.get_session(&conversation_id) {
+        Some(s) => s,
+        None => {
+            return Redirect::to(&format!(
+                "/forum/{}/pm?error=conversation_not_found",
+                forum_hash_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Find peer's encryption identity by their identity node hash
+    let peer_identity_hash = *session_data.peer_identity_hash();
+
+    // Load peer's encryption identity directly by hash
+    let recipient_identity = match app_state
+        .forum_persistence
+        .load_node(&forum_hash, &peer_identity_hash)
+    {
+        Ok(Some(DagNode::EncryptionIdentity(ei))) => ei,
+        Ok(Some(_)) => {
+            error!("Peer identity hash points to wrong node type");
+            return Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=peer_not_found",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response();
+        }
+        Ok(None) => {
+            error!(
+                "Peer identity not found for hash: {}",
+                peer_identity_hash.to_hex()
+            );
+            return Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=peer_not_found",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response();
+        }
+        Err(e) => {
+            error!("Failed to load peer identity: {}", e);
+            return Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=peer_not_found",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Get our signing keys to find our encryption identity
+    let signing_keys = get_signing_keys();
+    let our_fingerprints: Vec<String> =
+        signing_keys.iter().map(|k| k.fingerprint.clone()).collect();
+
+    let (_our_identity_hash, our_identity) = match find_our_encryption_identity(
+        &app_state.forum_persistence,
+        &forum_hash,
+        &our_fingerprints,
+    ) {
+        Some(result) => result,
+        None => {
+            return Redirect::to(&format!("/forum/{}/pm?error=no_identity", forum_hash_str))
+                .into_response();
+        }
+    };
+
+    // Create inner message
+    let mut inner = InnerMessage::new(conversation_id, form.body);
+    if let Some(subject) = form.subject.filter(|s| !s.is_empty()) {
+        inner = inner.with_subject(subject);
+    }
+    if let Some(reply_to) = form.reply_to.filter(|r| !r.is_empty()) {
+        if let Ok(bytes) = hex::decode(&reply_to) {
+            if bytes.len() == 16 {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&bytes);
+                inner = inner.with_reply_to(arr);
+            }
+        }
+    }
+    let inner_for_storage = inner.clone();
+
+    // Seal the message using existing session key
+    let existing_key = session_data.conversation_key();
+    let sealed_result = match pqpgp::forum::seal_private_message_with_session(
+        forum_hash,
+        &our_identity,
+        &recipient_identity,
+        inner,
+        existing_key,
+        conversation_id,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Failed to seal reply: {}", e);
+            return Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=seal_failed",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response();
+        }
+    };
+
+    // Store locally
+    let node = DagNode::SealedPrivateMessage(sealed_result.message.clone());
+    if let Err(e) = app_state
+        .forum_persistence
+        .store_node_for_forum(&forum_hash, &node)
+    {
+        error!("Failed to store sealed reply: {}", e);
+        return Redirect::to(&format!(
+            "/forum/{}/pm/conversation/{}?error=storage_failed",
+            forum_hash_str, conversation_id_str
+        ))
+        .into_response();
+    }
+
+    // Submit to relay
+    let client = Client::new();
+    let relay_url = get_relay_url();
+
+    let request = match pqpgp::forum::SubmitNodeRequest::new(forum_hash, &node) {
+        Ok(r) => r,
+        Err(e) => {
+            error!("Failed to create submit request: {}", e);
+            return Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=serialization_failed",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response();
+        }
+    };
+
+    match client
+        .post(format!("{}/forums/nodes/submit", relay_url))
+        .json(&request)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => {
+            // Store the reply in conversation history
+            let mut conversation_manager = app_state
+                .forum_persistence
+                .load_conversation_manager()
+                .unwrap_or_else(|_| ConversationManager::new());
+
+            let stored_msg = StoredMessage {
+                inner: inner_for_storage,
+                dag_hash: *node.hash(),
+                is_outgoing: true,
+                processed_at: current_timestamp_millis(),
+            };
+
+            if let Err(e) = conversation_manager.store_message(&conversation_id, stored_msg) {
+                warn!("Failed to store reply in history: {}", e);
+            }
+
+            // Save conversation manager
+            if let Err(e) = app_state
+                .forum_persistence
+                .store_conversation_manager(&conversation_manager)
+            {
+                warn!("Failed to save conversation manager: {}", e);
+            }
+
+            Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?result=reply_sent",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response()
+        }
+        Ok(response) => {
+            warn!("Relay rejected reply: {:?}", response.status());
+            Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=relay_rejected",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            error!("Failed to submit reply: {}", e);
+            Redirect::to(&format!(
+                "/forum/{}/pm/conversation/{}?error=relay_error",
+                forum_hash_str, conversation_id_str
+            ))
+            .into_response()
         }
     }
 }

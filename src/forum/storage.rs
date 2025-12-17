@@ -1,418 +1,1353 @@
-//! Client-side storage for forum DAG data.
+//! Forum data persistence using RocksDB.
 //!
-//! This module provides persistent storage for forum nodes on the client side.
-//! The storage is organized to enable efficient:
-//! - Node lookup by content hash
-//! - Listing nodes by type and parent
-//! - Sync operations (finding heads, missing nodes)
+//! This module provides persistent storage for forum DAG nodes using RocksDB
+//! for efficient key-value storage with column families for logical separation.
 //!
-//! ## Directory Structure
+//! ## Storage Layout
 //!
-//! ```text
-//! pqpgp_forum_data/
-//! ├── nodes/
-//! │   └── ab/                      # First byte of hash (hex)
-//! │       └── ab12cd34...node      # Full hash, serialized DagNode
-//! ├── indexes/
-//! │   ├── forums.idx               # List of all forum hashes
-//! │   ├── boards/
-//! │   │   └── {forum_hash}.idx     # Boards in a forum
-//! │   ├── threads/
-//! │   │   └── {board_hash}.idx     # Threads in a board
-//! │   └── posts/
-//! │       └── {thread_hash}.idx    # Posts in a thread
-//! └── heads/
-//!     └── {forum_hash}.heads       # Current DAG heads for sync
-//! ```
+//! Uses column families for logical separation:
+//! - `nodes`: `{forum_hash}:{node_hash}` -> serialized DagNode
+//! - `forums`: `{forum_hash}` -> forum metadata
+//! - `heads`: `{forum_hash}` -> serialized Vec<ContentHash> (DAG heads)
+//! - `meta`: `forum_list` -> list of all synced forum hashes
+//! - `private`: Local-only data (encryption keys, conversations, consumed OTPs)
+//!
+//! ## SECURITY NOTE: Encryption Private Keys
+//!
+//! **Current Implementation**: Encryption identity private keys are stored using
+//! bincode serialization without additional encryption. This means:
+//!
+//! - **Local storage security depends on file system security**
+//! - If an attacker gains access to the storage directory, they can read private keys
+//! - All PM decryption capability would be compromised
+//!
+//! **Recommendation for Production**:
+//! - Use full-disk encryption (BitLocker, LUKS, FileVault)
+//! - Apply restrictive file permissions (chmod 600 on Unix)
+//! - Consider application-level encryption with user-provided password
+//!
+//! **Future Enhancement**: Add optional password-based encryption using
+//! `EncryptedPrivateKey` from `crate::crypto::password` module for private
+//! key storage. This would require:
+//! - Password prompt on application startup
+//! - Key derivation and caching for the session
+//! - Secure memory handling with zeroization
 
-use crate::error::Result;
-use crate::forum::{BoardGenesis, ContentHash, DagNode, ForumGenesis, Post, ThreadRoot};
+use crate::error::{PqpgpError, Result};
+use crate::forum::conversation::{ConversationManager, ConversationSession, CONVERSATION_ID_SIZE};
+use crate::forum::encryption_identity::EncryptionIdentityPrivate;
+use crate::forum::{
+    BoardGenesis, ContentHash, DagNode, EditNode, ForumGenesis, ModAction, ModActionNode, Post,
+    SealedPrivateMessage, ThreadRoot,
+};
+use rocksdb::{
+    BoundColumnFamily, ColumnFamilyDescriptor, DBWithThreadMode, MultiThreaded, Options,
+};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
+use tracing::{info, warn};
 
-/// Storage manager for forum DAG data.
-#[derive(Debug)]
+/// Default data directory name.
+const DEFAULT_DATA_DIR: &str = "pqpgp_forum_data";
+
+/// Database subdirectory.
+const DB_DIR: &str = "forum_db";
+
+/// Column family names.
+const CF_NODES: &str = "nodes";
+const CF_FORUMS: &str = "forums";
+const CF_HEADS: &str = "heads";
+const CF_META: &str = "meta";
+const CF_PRIVATE: &str = "private";
+
+/// Key for the forum list in the meta column family.
+const META_FORUM_LIST: &[u8] = b"forum_list";
+
+/// Prefix for encryption private keys in the private column family.
+const PRIVATE_ENCRYPTION_KEY_PREFIX: &[u8] = b"enc_key:";
+
+/// Prefix for conversation sessions in the private column family.
+const PRIVATE_CONVERSATION_PREFIX: &[u8] = b"conv:";
+
+/// Key for conversation manager in the private column family.
+const PRIVATE_CONVERSATION_MANAGER: &[u8] = b"conv_manager";
+
+/// Prefix for consumed OTPs in the private column family.
+const PRIVATE_CONSUMED_OTP_PREFIX: &[u8] = b"consumed_otp:";
+
+/// Forum metadata stored in the forums column family.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ForumMetadata {
+    /// Forum name.
+    pub name: String,
+    /// Forum description.
+    pub description: String,
+    /// Creation timestamp.
+    pub created_at: u64,
+    /// Owner's identity bytes.
+    pub owner_identity: Vec<u8>,
+}
+
+/// RocksDB-backed forum storage.
 pub struct ForumStorage {
-    /// Root directory for forum data.
-    root_dir: PathBuf,
+    db: Arc<DBWithThreadMode<MultiThreaded>>,
+}
+
+impl std::fmt::Debug for ForumStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ForumStorage")
+            .field("db", &"RocksDB")
+            .finish()
+    }
 }
 
 impl ForumStorage {
-    /// Creates a new storage manager with the given root directory.
+    /// Creates a new storage manager with the default data directory.
+    pub fn new_default() -> Result<Self> {
+        Self::new(DEFAULT_DATA_DIR)
+    }
+
+    /// Creates a new storage manager with a custom data directory.
+    pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
+        let db_path = data_dir.as_ref().join(DB_DIR);
+
+        // Configure RocksDB options
+        let mut opts = Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        opts.set_max_open_files(128);
+        opts.set_keep_log_file_num(2);
+        opts.set_max_total_wal_size(32 * 1024 * 1024); // 32MB WAL
+        opts.increase_parallelism(num_cpus::get() as i32);
+
+        // Optimize for writes (LSM compaction)
+        opts.set_write_buffer_size(32 * 1024 * 1024); // 32MB write buffer
+        opts.set_max_write_buffer_number(2);
+        opts.set_target_file_size_base(32 * 1024 * 1024);
+
+        // Enable compression
+        opts.set_compression_type(rocksdb::DBCompressionType::Lz4);
+
+        // Column family options
+        let cf_opts = Options::default();
+
+        let cf_descriptors = vec![
+            ColumnFamilyDescriptor::new(CF_NODES, cf_opts.clone()),
+            ColumnFamilyDescriptor::new(CF_FORUMS, cf_opts.clone()),
+            ColumnFamilyDescriptor::new(CF_HEADS, cf_opts.clone()),
+            ColumnFamilyDescriptor::new(CF_META, cf_opts.clone()),
+            ColumnFamilyDescriptor::new(CF_PRIVATE, cf_opts),
+        ];
+
+        // Open database with column families
+        let db =
+            DBWithThreadMode::<MultiThreaded>::open_cf_descriptors(&opts, &db_path, cf_descriptors)
+                .map_err(|e| PqpgpError::storage(format!("Failed to open RocksDB: {}", e)))?;
+
+        info!("Opened forum RocksDB at {:?}", db_path);
+
+        Ok(Self { db: Arc::new(db) })
+    }
+
+    /// Gets a column family handle.
+    fn cf(&self, name: &str) -> Result<Arc<BoundColumnFamily<'_>>> {
+        self.db
+            .cf_handle(name)
+            .ok_or_else(|| PqpgpError::storage(format!("Column family '{}' not found", name)))
+    }
+
+    /// Creates a composite key for node storage.
+    fn node_key(forum_hash: &ContentHash, node_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.push(b':');
+        key.extend_from_slice(node_hash.as_bytes());
+        key
+    }
+
+    // ========================================================================
+    // Core Node Storage
+    // ========================================================================
+
+    /// Stores a node in the database.
     ///
-    /// Creates the directory structure if it doesn't exist.
-    pub fn new(root_dir: impl AsRef<Path>) -> Result<Self> {
-        let root_dir = root_dir.as_ref().to_path_buf();
-
-        // Create directory structure
-        fs::create_dir_all(root_dir.join("nodes"))?;
-        fs::create_dir_all(root_dir.join("indexes/boards"))?;
-        fs::create_dir_all(root_dir.join("indexes/threads"))?;
-        fs::create_dir_all(root_dir.join("indexes/posts"))?;
-        fs::create_dir_all(root_dir.join("heads"))?;
-
-        Ok(Self { root_dir })
-    }
-
-    /// Returns the path for a node file.
-    fn node_path(&self, hash: &ContentHash) -> PathBuf {
-        let hex = hash.to_hex();
-        let prefix = &hex[..2];
-        self.root_dir
-            .join("nodes")
-            .join(prefix)
-            .join(format!("{}.node", hex))
-    }
-
-    /// Returns the path for the forums index.
-    fn forums_index_path(&self) -> PathBuf {
-        self.root_dir.join("indexes/forums.idx")
-    }
-
-    /// Returns the path for a forum's boards index.
-    fn boards_index_path(&self, forum_hash: &ContentHash) -> PathBuf {
-        self.root_dir
-            .join("indexes/boards")
-            .join(format!("{}.idx", forum_hash.to_hex()))
-    }
-
-    /// Returns the path for a board's threads index.
-    fn threads_index_path(&self, board_hash: &ContentHash) -> PathBuf {
-        self.root_dir
-            .join("indexes/threads")
-            .join(format!("{}.idx", board_hash.to_hex()))
-    }
-
-    /// Returns the path for a thread's posts index.
-    fn posts_index_path(&self, thread_hash: &ContentHash) -> PathBuf {
-        self.root_dir
-            .join("indexes/posts")
-            .join(format!("{}.idx", thread_hash.to_hex()))
-    }
-
-    /// Returns the path for a forum's heads file.
-    fn heads_path(&self, forum_hash: &ContentHash) -> PathBuf {
-        self.root_dir
-            .join("heads")
-            .join(format!("{}.heads", forum_hash.to_hex()))
-    }
-
-    /// Stores a node in the storage.
-    ///
-    /// Also updates relevant indexes.
+    /// The forum_hash is extracted from the node itself based on its type.
     pub fn store_node(&self, node: &DagNode) -> Result<()> {
-        let hash = node.hash();
-        let path = self.node_path(hash);
+        let forum_hash = self.get_node_forum_hash(node)?;
+        self.store_node_for_forum(&forum_hash, node)
+    }
 
-        // Create parent directory if needed
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
+    /// Stores a node for a specific forum.
+    pub fn store_node_for_forum(&self, forum_hash: &ContentHash, node: &DagNode) -> Result<()> {
+        let cf = self.cf(CF_NODES)?;
+        let key = Self::node_key(forum_hash, node.hash());
+        let value = node.to_bytes()?;
 
-        // Serialize and write node
-        let bytes = node.to_bytes()?;
-        let mut file = BufWriter::new(File::create(&path)?);
-        file.write_all(&bytes)?;
-
-        // Update indexes
-        self.update_indexes(node)?;
+        self.db
+            .put_cf(&cf, &key, &value)
+            .map_err(|e| PqpgpError::storage(format!("Failed to store node: {}", e)))?;
 
         Ok(())
     }
 
-    /// Updates indexes for a node.
-    fn update_indexes(&self, node: &DagNode) -> Result<()> {
+    /// Gets the forum hash from a node.
+    fn get_node_forum_hash(&self, node: &DagNode) -> Result<ContentHash> {
         match node {
-            DagNode::ForumGenesis(forum) => {
-                self.append_to_index(&self.forums_index_path(), forum.hash())?;
-            }
-            DagNode::BoardGenesis(board) => {
-                self.append_to_index(&self.boards_index_path(board.forum_hash()), board.hash())?;
-            }
+            DagNode::ForumGenesis(forum) => Ok(*forum.hash()),
+            DagNode::BoardGenesis(board) => Ok(*board.forum_hash()),
             DagNode::ThreadRoot(thread) => {
-                self.append_to_index(&self.threads_index_path(thread.board_hash()), thread.hash())?;
+                // Need to look up the board to get forum hash
+                if let Some(board) = self.load_board_by_scan(thread.board_hash())? {
+                    Ok(*board.forum_hash())
+                } else {
+                    Err(PqpgpError::storage(
+                        "Cannot determine forum hash for thread - board not found",
+                    ))
+                }
             }
             DagNode::Post(post) => {
-                self.append_to_index(&self.posts_index_path(post.thread_hash()), post.hash())?;
+                // Need to look up the thread to get board, then forum
+                if let Some(thread) = self.load_thread_by_scan(post.thread_hash())? {
+                    if let Some(board) = self.load_board_by_scan(thread.board_hash())? {
+                        Ok(*board.forum_hash())
+                    } else {
+                        Err(PqpgpError::storage(
+                            "Cannot determine forum hash for post - board not found",
+                        ))
+                    }
+                } else {
+                    Err(PqpgpError::storage(
+                        "Cannot determine forum hash for post - thread not found",
+                    ))
+                }
             }
-            DagNode::ModAction(_) => {
-                // Moderation actions are not indexed separately
-            }
-            DagNode::Edit(_) => {
-                // Edit nodes are not indexed separately - they're applied when displaying content
+            DagNode::ModAction(action) => Ok(*action.forum_hash()),
+            DagNode::Edit(edit) => Ok(*edit.forum_hash()),
+            DagNode::EncryptionIdentity(identity) => Ok(*identity.forum_hash()),
+            DagNode::SealedPrivateMessage(message) => Ok(*message.forum_hash()),
+        }
+    }
+
+    /// Scans all nodes to find a board by hash.
+    fn load_board_by_scan(&self, board_hash: &ContentHash) -> Result<Option<BoardGenesis>> {
+        let cf = self.cf(CF_NODES)?;
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            match item {
+                Ok((_, value)) => {
+                    if let Ok(node) = DagNode::from_bytes(&value) {
+                        if let Some(board) = node.as_board_genesis() {
+                            if board.hash() == board_hash {
+                                return Ok(Some(board.clone()));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Error during board scan: {}", e);
+                }
             }
         }
+        Ok(None)
+    }
+
+    /// Scans all nodes to find a thread by hash.
+    fn load_thread_by_scan(&self, thread_hash: &ContentHash) -> Result<Option<ThreadRoot>> {
+        let cf = self.cf(CF_NODES)?;
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+
+        for item in iter {
+            match item {
+                Ok((_, value)) => {
+                    if let Ok(node) = DagNode::from_bytes(&value) {
+                        if let Some(thread) = node.as_thread_root() {
+                            if thread.hash() == thread_hash {
+                                return Ok(Some(thread.clone()));
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Error during thread scan: {}", e);
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// Loads a node by its hash within a specific forum.
+    pub fn load_node(
+        &self,
+        forum_hash: &ContentHash,
+        node_hash: &ContentHash,
+    ) -> Result<Option<DagNode>> {
+        let cf = self.cf(CF_NODES)?;
+        let key = Self::node_key(forum_hash, node_hash);
+
+        match self.db.get_cf(&cf, &key) {
+            Ok(Some(value)) => {
+                let node = DagNode::from_bytes(&value)?;
+                Ok(Some(node))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(PqpgpError::storage(format!("Failed to load node: {}", e))),
+        }
+    }
+
+    /// Checks if a node exists.
+    pub fn node_exists(&self, forum_hash: &ContentHash, node_hash: &ContentHash) -> Result<bool> {
+        let cf = self.cf(CF_NODES)?;
+        let key = Self::node_key(forum_hash, node_hash);
+
+        self.db
+            .get_cf(&cf, &key)
+            .map(|v| v.is_some())
+            .map_err(|e| PqpgpError::storage(format!("Failed to check node: {}", e)))
+    }
+
+    /// Loads all nodes for a forum.
+    pub fn load_forum_nodes(&self, forum_hash: &ContentHash) -> Result<Vec<DagNode>> {
+        let cf = self.cf(CF_NODES)?;
+        let prefix = forum_hash.as_bytes();
+
+        let mut nodes = Vec::new();
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
+
+        for item in iter {
+            match item {
+                Ok((key, value)) => {
+                    // Verify key starts with our prefix (prefix iterator may return extra)
+                    if !key.starts_with(prefix) {
+                        break;
+                    }
+                    match DagNode::from_bytes(&value) {
+                        Ok(node) => nodes.push(node),
+                        Err(e) => {
+                            warn!("Failed to deserialize node: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("Error iterating nodes: {}", e);
+                }
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    /// Loads all nodes from all forums.
+    pub fn load_all_nodes(&self) -> Result<HashMap<ContentHash, DagNode>> {
+        let cf = self.cf(CF_NODES)?;
+        let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+
+        let mut nodes = HashMap::new();
+        for item in iter {
+            match item {
+                Ok((_, value)) => {
+                    if let Ok(node) = DagNode::from_bytes(&value) {
+                        nodes.insert(*node.hash(), node);
+                    }
+                }
+                Err(e) => {
+                    warn!("Error loading node: {}", e);
+                }
+            }
+        }
+
+        Ok(nodes)
+    }
+
+    // ========================================================================
+    // Forum Metadata
+    // ========================================================================
+
+    /// Stores forum metadata.
+    pub fn store_forum_metadata(
+        &self,
+        forum_hash: &ContentHash,
+        metadata: &ForumMetadata,
+    ) -> Result<()> {
+        let cf = self.cf(CF_FORUMS)?;
+        let value = bincode::serialize(metadata).map_err(|e| {
+            PqpgpError::serialization(format!("Failed to serialize metadata: {}", e))
+        })?;
+
+        self.db
+            .put_cf(&cf, forum_hash.as_bytes(), &value)
+            .map_err(|e| PqpgpError::storage(format!("Failed to store metadata: {}", e)))?;
+
+        // Add to forum list
+        self.add_forum_to_list(forum_hash)?;
+
         Ok(())
     }
 
-    /// Appends a hash to an index file.
-    fn append_to_index(&self, path: &Path, hash: &ContentHash) -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        writeln!(file, "{}", hash.to_hex())?;
+    /// Loads forum metadata.
+    pub fn load_forum_metadata(&self, forum_hash: &ContentHash) -> Result<Option<ForumMetadata>> {
+        let cf = self.cf(CF_FORUMS)?;
+
+        match self.db.get_cf(&cf, forum_hash.as_bytes()) {
+            Ok(Some(value)) => {
+                let metadata: ForumMetadata = bincode::deserialize(&value).map_err(|e| {
+                    PqpgpError::serialization(format!("Failed to deserialize metadata: {}", e))
+                })?;
+                Ok(Some(metadata))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(PqpgpError::storage(format!(
+                "Failed to load metadata: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Checks if a forum exists locally.
+    pub fn forum_exists(&self, forum_hash: &ContentHash) -> Result<bool> {
+        self.load_forum_metadata(forum_hash).map(|m| m.is_some())
+    }
+
+    // ========================================================================
+    // DAG Heads Management
+    // ========================================================================
+
+    /// Gets the current DAG heads for a forum.
+    pub fn get_heads(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
+        let cf = self.cf(CF_HEADS)?;
+
+        match self.db.get_cf(&cf, forum_hash.as_bytes()) {
+            Ok(Some(value)) => {
+                let heads: Vec<ContentHash> = bincode::deserialize(&value).map_err(|e| {
+                    PqpgpError::serialization(format!("Failed to deserialize heads: {}", e))
+                })?;
+                Ok(heads.into_iter().collect())
+            }
+            Ok(None) => Ok(HashSet::new()),
+            Err(e) => Err(PqpgpError::storage(format!("Failed to get heads: {}", e))),
+        }
+    }
+
+    /// Sets the DAG heads for a forum.
+    pub fn set_heads(&self, forum_hash: &ContentHash, heads: &HashSet<ContentHash>) -> Result<()> {
+        let cf = self.cf(CF_HEADS)?;
+        let heads_vec: Vec<ContentHash> = heads.iter().copied().collect();
+        let value = bincode::serialize(&heads_vec)
+            .map_err(|e| PqpgpError::serialization(format!("Failed to serialize heads: {}", e)))?;
+
+        self.db
+            .put_cf(&cf, forum_hash.as_bytes(), &value)
+            .map_err(|e| PqpgpError::storage(format!("Failed to set heads: {}", e)))?;
+
         Ok(())
     }
 
-    /// Reads hashes from an index file.
-    fn read_index(&self, path: &Path) -> Result<Vec<ContentHash>> {
-        if !path.exists() {
-            return Ok(Vec::new());
+    /// Updates heads after storing a new node.
+    pub fn update_heads_for_node(&self, forum_hash: &ContentHash, node: &DagNode) -> Result<()> {
+        let mut heads = self.get_heads(forum_hash)?;
+
+        // Remove parents from heads (they now have children)
+        for parent_hash in node.parent_hashes() {
+            heads.remove(&parent_hash);
         }
 
-        let file = File::open(path)?;
-        let reader = BufReader::new(file);
+        // Add this node as a head
+        heads.insert(*node.hash());
+
+        self.set_heads(forum_hash, &heads)
+    }
+
+    // ========================================================================
+    // Forum List Management
+    // ========================================================================
+
+    /// Lists all synced forum hashes.
+    pub fn list_forums(&self) -> Result<Vec<ContentHash>> {
+        let cf = self.cf(CF_META)?;
+
+        match self.db.get_cf(&cf, META_FORUM_LIST) {
+            Ok(Some(value)) => {
+                let forums: Vec<ContentHash> = bincode::deserialize(&value).map_err(|e| {
+                    PqpgpError::serialization(format!("Failed to deserialize forum list: {}", e))
+                })?;
+                Ok(forums)
+            }
+            Ok(None) => Ok(Vec::new()),
+            Err(e) => Err(PqpgpError::storage(format!("Failed to list forums: {}", e))),
+        }
+    }
+
+    /// Adds a forum to the list of synced forums.
+    fn add_forum_to_list(&self, forum_hash: &ContentHash) -> Result<()> {
+        let cf = self.cf(CF_META)?;
+        let mut forums = self.list_forums()?;
+
+        if !forums.contains(forum_hash) {
+            forums.push(*forum_hash);
+            let value = bincode::serialize(&forums).map_err(|e| {
+                PqpgpError::serialization(format!("Failed to serialize forum list: {}", e))
+            })?;
+
+            self.db
+                .put_cf(&cf, META_FORUM_LIST, &value)
+                .map_err(|e| PqpgpError::storage(format!("Failed to update forum list: {}", e)))?;
+        }
+
+        Ok(())
+    }
+
+    /// Removes a forum and all its data.
+    pub fn remove_forum(&self, forum_hash: &ContentHash) -> Result<()> {
+        // Delete all nodes for this forum
+        let cf_nodes = self.cf(CF_NODES)?;
+        let prefix = forum_hash.as_bytes();
+        let iter = self.db.prefix_iterator_cf(&cf_nodes, prefix);
+
+        for item in iter {
+            match item {
+                Ok((key, _)) => {
+                    if !key.starts_with(prefix) {
+                        break;
+                    }
+                    self.db.delete_cf(&cf_nodes, &key).map_err(|e| {
+                        PqpgpError::storage(format!("Failed to delete node: {}", e))
+                    })?;
+                }
+                Err(e) => {
+                    warn!("Error during node deletion: {}", e);
+                }
+            }
+        }
+
+        // Delete forum metadata
+        let cf_forums = self.cf(CF_FORUMS)?;
+        self.db
+            .delete_cf(&cf_forums, forum_hash.as_bytes())
+            .map_err(|e| PqpgpError::storage(format!("Failed to delete forum metadata: {}", e)))?;
+
+        // Delete heads
+        let cf_heads = self.cf(CF_HEADS)?;
+        self.db
+            .delete_cf(&cf_heads, forum_hash.as_bytes())
+            .map_err(|e| PqpgpError::storage(format!("Failed to delete heads: {}", e)))?;
+
+        // Remove from forum list
+        let cf_meta = self.cf(CF_META)?;
+        let forums = self.list_forums()?;
+        let filtered: Vec<_> = forums
+            .iter()
+            .filter(|h| *h != forum_hash)
+            .copied()
+            .collect();
+        let value = bincode::serialize(&filtered).map_err(|e| {
+            PqpgpError::serialization(format!("Failed to serialize forum list: {}", e))
+        })?;
+        self.db
+            .put_cf(&cf_meta, META_FORUM_LIST, &value)
+            .map_err(|e| PqpgpError::storage(format!("Failed to update forum list: {}", e)))?;
+
+        info!("Removed forum {} from local storage", forum_hash.short());
+        Ok(())
+    }
+
+    // ========================================================================
+    // Query Methods for UI Display
+    // ========================================================================
+
+    /// Gets all boards in a forum, sorted by creation time (newest first).
+    pub fn get_boards(&self, forum_hash: &ContentHash) -> Result<Vec<BoardGenesis>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut boards: Vec<BoardGenesis> = nodes
+            .into_iter()
+            .filter_map(|n| n.as_board_genesis().cloned())
+            .collect();
+
+        // Sort by created_at descending (newest first)
+        boards.sort_by_key(|b| std::cmp::Reverse(b.created_at()));
+        Ok(boards)
+    }
+
+    /// Gets all threads in a board, sorted by creation time (newest first).
+    ///
+    /// This accounts for moved threads: threads that were originally in another board
+    /// but have been moved to this board will be included, and threads that were
+    /// originally in this board but have been moved elsewhere will be excluded.
+    pub fn get_threads(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+    ) -> Result<Vec<ThreadRoot>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        // Get the map of moved threads (thread_hash -> current_board_hash)
+        let moved_threads = self.get_moved_threads(forum_hash)?;
+
+        let mut threads: Vec<ThreadRoot> = nodes
+            .into_iter()
+            .filter_map(|n| n.as_thread_root().cloned())
+            .filter(|t| {
+                // Check if thread has been moved
+                let current_board = moved_threads
+                    .get(t.hash())
+                    .unwrap_or_else(|| t.board_hash());
+                current_board == board_hash
+            })
+            .collect();
+
+        // Sort by created_at descending (newest first)
+        threads.sort_by_key(|t| std::cmp::Reverse(t.created_at()));
+        Ok(threads)
+    }
+
+    /// Gets all posts in a thread, sorted by creation time (oldest first for chronological reading).
+    pub fn get_posts(
+        &self,
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+    ) -> Result<Vec<Post>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut posts: Vec<Post> = nodes
+            .into_iter()
+            .filter_map(|n| n.as_post().cloned())
+            .filter(|p| p.thread_hash() == thread_hash)
+            .collect();
+
+        // Sort by created_at ascending (oldest first for chronological reading)
+        posts.sort_by_key(|p| p.created_at());
+        Ok(posts)
+    }
+
+    /// Gets the post count for a thread.
+    pub fn get_post_count(
+        &self,
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+    ) -> Result<usize> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let count = nodes
+            .iter()
+            .filter_map(|n| n.as_post())
+            .filter(|p| p.thread_hash() == thread_hash)
+            .count();
+        Ok(count)
+    }
+
+    /// Gets a specific board by hash.
+    pub fn get_board(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+    ) -> Result<Option<BoardGenesis>> {
+        let node = self.load_node(forum_hash, board_hash)?;
+        Ok(node.and_then(|n| n.as_board_genesis().cloned()))
+    }
+
+    /// Gets a specific thread by hash.
+    pub fn get_thread(
+        &self,
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+    ) -> Result<Option<ThreadRoot>> {
+        let node = self.load_node(forum_hash, thread_hash)?;
+        Ok(node.and_then(|n| n.as_thread_root().cloned()))
+    }
+
+    /// Loads a forum by hash.
+    pub fn load_forum(&self, forum_hash: &ContentHash) -> Result<Option<ForumGenesis>> {
+        let node = self.load_node(forum_hash, forum_hash)?;
+        Ok(node.and_then(|n| n.as_forum_genesis().cloned()))
+    }
+
+    /// Loads a board by hash.
+    pub fn load_board(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+    ) -> Result<Option<BoardGenesis>> {
+        self.get_board(forum_hash, board_hash)
+    }
+
+    /// Loads a thread by hash.
+    pub fn load_thread(
+        &self,
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+    ) -> Result<Option<ThreadRoot>> {
+        self.get_thread(forum_hash, thread_hash)
+    }
+
+    /// Loads a post by hash.
+    pub fn load_post(
+        &self,
+        forum_hash: &ContentHash,
+        post_hash: &ContentHash,
+    ) -> Result<Option<Post>> {
+        let node = self.load_node(forum_hash, post_hash)?;
+        Ok(node.and_then(|n| n.as_post().cloned()))
+    }
+
+    /// Gets all mod actions for a forum.
+    pub fn get_mod_actions(&self, forum_hash: &ContentHash) -> Result<Vec<ModActionNode>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let actions: Vec<ModActionNode> = nodes
+            .into_iter()
+            .filter_map(|n| n.as_mod_action().cloned())
+            .collect();
+        Ok(actions)
+    }
+
+    /// Gets the effective board name and description after applying edits.
+    ///
+    /// Returns (name, description) with the most recent edit values applied.
+    pub fn get_effective_board_info(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+    ) -> Result<Option<(String, String)>> {
+        // Get the original board
+        let board = match self.get_board(forum_hash, board_hash)? {
+            Some(b) => b,
+            None => return Ok(None),
+        };
+
+        let mut name = board.name().to_string();
+        let mut description = board.description().to_string();
+
+        // Get all edit nodes for this board, sorted by timestamp (newest last)
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut edits: Vec<&EditNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_edit())
+            .filter(|e| e.target_hash() == board_hash)
+            .collect();
+        edits.sort_by_key(|e| e.created_at());
+
+        // Apply edits in order (most recent wins)
+        for edit in edits {
+            if let Some(new_name) = edit.new_name() {
+                name = new_name.to_string();
+            }
+            if let Some(new_desc) = edit.new_description() {
+                description = new_desc.to_string();
+            }
+        }
+
+        Ok(Some((name, description)))
+    }
+
+    /// Gets the effective forum name and description after applying edits.
+    ///
+    /// Returns (name, description) with the most recent edit values applied.
+    pub fn get_effective_forum_info(
+        &self,
+        forum_hash: &ContentHash,
+    ) -> Result<Option<(String, String)>> {
+        // Get the forum metadata (original values)
+        let metadata = match self.load_forum_metadata(forum_hash)? {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        let mut name = metadata.name;
+        let mut description = metadata.description;
+
+        // Get all edit nodes for this forum, sorted by timestamp (newest last)
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut edits: Vec<&EditNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_edit())
+            .filter(|e| e.target_hash() == forum_hash) // Forum edits target the forum itself
+            .collect();
+        edits.sort_by_key(|e| e.created_at());
+
+        // Apply edits in order (most recent wins)
+        for edit in edits {
+            if let Some(new_name) = edit.new_name() {
+                name = new_name.to_string();
+            }
+            if let Some(new_desc) = edit.new_description() {
+                description = new_desc.to_string();
+            }
+        }
+
+        Ok(Some((name, description)))
+    }
+
+    /// Computes the current forum-level moderators by replaying mod actions.
+    ///
+    /// Returns (moderator_fingerprints, owner_fingerprint) where owner is the forum creator.
+    pub fn get_forum_moderators(
+        &self,
+        forum_hash: &ContentHash,
+    ) -> Result<(HashSet<String>, Option<String>)> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        // Find the forum genesis to get the owner
+        let owner_fingerprint = nodes
+            .iter()
+            .filter_map(|n| n.as_forum_genesis())
+            .next()
+            .map(|g| fingerprint_from_identity(g.creator_identity()));
+
+        // Build set of moderators by replaying add/remove actions
+        let mut moderators: HashSet<String> = HashSet::new();
+
+        // Owner is always a moderator
+        if let Some(ref owner_fp) = owner_fingerprint {
+            moderators.insert(owner_fp.clone());
+        }
+
+        // Sort mod actions by creation time to replay in order
+        let mut mod_actions: Vec<&ModActionNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_mod_action())
+            .filter(|m| m.board_hash().is_none()) // Forum-level only
+            .collect();
+        mod_actions.sort_by_key(|m| m.created_at());
+
+        for action in mod_actions {
+            let target_fp = fingerprint_from_identity(action.target_identity());
+            match action.action() {
+                ModAction::AddModerator => {
+                    moderators.insert(target_fp);
+                }
+                ModAction::RemoveModerator => {
+                    // Can't remove the owner
+                    if Some(&target_fp) != owner_fingerprint.as_ref() {
+                        moderators.remove(&target_fp);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok((moderators, owner_fingerprint))
+    }
+
+    /// Computes the current board-level moderators by replaying mod actions.
+    pub fn get_board_moderators(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+    ) -> Result<HashSet<String>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        let mut moderators: HashSet<String> = HashSet::new();
+
+        // Sort mod actions by creation time to replay in order
+        let mut mod_actions: Vec<&ModActionNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_mod_action())
+            .filter(|m| m.board_hash() == Some(board_hash))
+            .collect();
+        mod_actions.sort_by_key(|m| m.created_at());
+
+        for action in mod_actions {
+            let target_fp = fingerprint_from_identity(action.target_identity());
+            match action.action() {
+                ModAction::AddBoardModerator => {
+                    moderators.insert(target_fp);
+                }
+                ModAction::RemoveBoardModerator => {
+                    moderators.remove(&target_fp);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(moderators)
+    }
+
+    /// Gets set of hidden thread hashes.
+    pub fn get_hidden_threads(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        let mut hidden: HashSet<ContentHash> = HashSet::new();
+
+        let mut mod_actions: Vec<&ModActionNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_mod_action())
+            .filter(|m| matches!(m.action(), ModAction::HideThread | ModAction::UnhideThread))
+            .collect();
+        mod_actions.sort_by_key(|m| m.created_at());
+
+        for action in mod_actions {
+            if let Some(target_hash) = action.target_node_hash() {
+                match action.action() {
+                    ModAction::HideThread => {
+                        hidden.insert(*target_hash);
+                    }
+                    ModAction::UnhideThread => {
+                        hidden.remove(target_hash);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(hidden)
+    }
+
+    /// Gets set of hidden post hashes.
+    pub fn get_hidden_posts(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        let mut hidden: HashSet<ContentHash> = HashSet::new();
+
+        let mut mod_actions: Vec<&ModActionNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_mod_action())
+            .filter(|m| matches!(m.action(), ModAction::HidePost | ModAction::UnhidePost))
+            .collect();
+        mod_actions.sort_by_key(|m| m.created_at());
+
+        for action in mod_actions {
+            if let Some(target_hash) = action.target_node_hash() {
+                match action.action() {
+                    ModAction::HidePost => {
+                        hidden.insert(*target_hash);
+                    }
+                    ModAction::UnhidePost => {
+                        hidden.remove(target_hash);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(hidden)
+    }
+
+    /// Gets set of hidden board hashes.
+    pub fn get_hidden_boards(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        let mut hidden: HashSet<ContentHash> = HashSet::new();
+
+        let mut mod_actions: Vec<&ModActionNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_mod_action())
+            .filter(|m| matches!(m.action(), ModAction::HideBoard | ModAction::UnhideBoard))
+            .collect();
+        mod_actions.sort_by_key(|m| m.created_at());
+
+        for action in mod_actions {
+            if let Some(board_hash) = action.board_hash() {
+                match action.action() {
+                    ModAction::HideBoard => {
+                        hidden.insert(*board_hash);
+                    }
+                    ModAction::UnhideBoard => {
+                        hidden.remove(board_hash);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(hidden)
+    }
+
+    /// Gets map of moved threads (thread_hash -> current_board_hash).
+    ///
+    /// MoveThread actions update the board that a thread belongs to.
+    /// The most recent MoveThread action for each thread determines its current board.
+    pub fn get_moved_threads(
+        &self,
+        forum_hash: &ContentHash,
+    ) -> Result<HashMap<ContentHash, ContentHash>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+
+        // Get all MoveThread actions sorted by timestamp
+        let mut move_actions: Vec<&ModActionNode> = nodes
+            .iter()
+            .filter_map(|n| n.as_mod_action())
+            .filter(|m| m.action() == ModAction::MoveThread)
+            .collect();
+        move_actions.sort_by_key(|m| m.created_at());
+
+        // Build map of thread -> current board (last move wins)
+        let mut moved: HashMap<ContentHash, ContentHash> = HashMap::new();
+
+        for action in move_actions {
+            if let (Some(thread_hash), Some(dest_board_hash)) =
+                (action.target_node_hash(), action.board_hash())
+            {
+                moved.insert(*thread_hash, *dest_board_hash);
+            }
+        }
+
+        Ok(moved)
+    }
+
+    // ========================================================================
+    // Private Message Storage Methods
+    // ========================================================================
+
+    /// Lists all encryption identities in a forum.
+    pub fn list_encryption_identities(&self, forum_hash: &ContentHash) -> Result<Vec<ContentHash>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let hashes: Vec<ContentHash> = nodes
+            .iter()
+            .filter_map(|n| n.as_encryption_identity())
+            .map(|e| *e.hash())
+            .collect();
+        Ok(hashes)
+    }
+
+    /// Lists all sealed messages in a forum.
+    pub fn list_sealed_messages(&self, forum_hash: &ContentHash) -> Result<Vec<ContentHash>> {
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let hashes: Vec<ContentHash> = nodes
+            .iter()
+            .filter_map(|n| n.as_sealed_private_message())
+            .map(|m| *m.hash())
+            .collect();
+        Ok(hashes)
+    }
+
+    /// Loads a sealed private message by hash.
+    pub fn load_sealed_message(
+        &self,
+        forum_hash: &ContentHash,
+        message_hash: &ContentHash,
+    ) -> Result<Option<SealedPrivateMessage>> {
+        let node = self.load_node(forum_hash, message_hash)?;
+        Ok(node.and_then(|n| n.as_sealed_private_message().cloned()))
+    }
+
+    /// Stores an encryption identity private key.
+    ///
+    /// This should be stored securely - the private key enables decrypting
+    /// all incoming private messages.
+    pub fn store_encryption_private(
+        &self,
+        identity_hash: &ContentHash,
+        private: &EncryptionIdentityPrivate,
+    ) -> Result<()> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_ENCRYPTION_KEY_PREFIX.to_vec();
+        key.extend_from_slice(identity_hash.as_bytes());
+
+        let value = bincode::serialize(private).map_err(|e| {
+            PqpgpError::serialization(format!("Failed to serialize encryption private: {}", e))
+        })?;
+
+        self.db.put_cf(&cf, &key, &value).map_err(|e| {
+            PqpgpError::storage(format!("Failed to store encryption private: {}", e))
+        })?;
+
+        Ok(())
+    }
+
+    /// Loads an encryption identity private key.
+    pub fn load_encryption_private(
+        &self,
+        identity_hash: &ContentHash,
+    ) -> Result<Option<EncryptionIdentityPrivate>> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_ENCRYPTION_KEY_PREFIX.to_vec();
+        key.extend_from_slice(identity_hash.as_bytes());
+
+        match self.db.get_cf(&cf, &key) {
+            Ok(Some(value)) => {
+                let private: EncryptionIdentityPrivate =
+                    bincode::deserialize(&value).map_err(|e| {
+                        PqpgpError::serialization(format!(
+                            "Failed to deserialize encryption private: {}",
+                            e
+                        ))
+                    })?;
+                Ok(Some(private))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(PqpgpError::storage(format!(
+                "Failed to load encryption private: {}",
+                e
+            ))),
+        }
+    }
+
+    /// Deletes an encryption identity private key.
+    pub fn delete_encryption_private(&self, identity_hash: &ContentHash) -> Result<()> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_ENCRYPTION_KEY_PREFIX.to_vec();
+        key.extend_from_slice(identity_hash.as_bytes());
+
+        self.db.delete_cf(&cf, &key).map_err(|e| {
+            PqpgpError::storage(format!("Failed to delete encryption private: {}", e))
+        })?;
+
+        Ok(())
+    }
+
+    /// Lists all encryption identity private keys stored locally.
+    pub fn list_encryption_privates(&self) -> Result<Vec<ContentHash>> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let prefix = PRIVATE_ENCRYPTION_KEY_PREFIX;
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
+
         let mut hashes = Vec::new();
-
-        for line in reader.lines() {
-            let line = line?;
-            let hash = ContentHash::from_hex(&line)?;
-            hashes.push(hash);
+        for item in iter {
+            match item {
+                Ok((key, _)) => {
+                    if !key.starts_with(prefix) {
+                        break;
+                    }
+                    // Extract hash from key (after prefix)
+                    let hash_bytes = &key[prefix.len()..];
+                    if hash_bytes.len() == 64 {
+                        let mut bytes = [0u8; 64];
+                        bytes.copy_from_slice(hash_bytes);
+                        hashes.push(ContentHash::from_bytes(bytes));
+                    }
+                }
+                Err(e) => {
+                    warn!("Error listing encryption privates: {}", e);
+                }
+            }
         }
 
         Ok(hashes)
     }
 
-    /// Loads a node by its content hash.
-    pub fn load_node(&self, hash: &ContentHash) -> Result<Option<DagNode>> {
-        let path = self.node_path(hash);
-        if !path.exists() {
-            return Ok(None);
-        }
+    /// Stores a conversation session.
+    pub fn store_conversation(&self, session: &ConversationSession) -> Result<()> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_CONVERSATION_PREFIX.to_vec();
+        key.extend_from_slice(session.conversation_id().as_bytes());
 
-        let bytes = fs::read(&path)?;
-        let node = DagNode::from_bytes(&bytes)?;
-        Ok(Some(node))
-    }
+        let value = bincode::serialize(session).map_err(|e| {
+            PqpgpError::serialization(format!("Failed to serialize conversation: {}", e))
+        })?;
 
-    /// Checks if a node exists in storage.
-    pub fn node_exists(&self, hash: &ContentHash) -> bool {
-        self.node_path(hash).exists()
-    }
+        self.db
+            .put_cf(&cf, &key, &value)
+            .map_err(|e| PqpgpError::storage(format!("Failed to store conversation: {}", e)))?;
 
-    /// Lists all forum hashes.
-    pub fn list_forums(&self) -> Result<Vec<ContentHash>> {
-        self.read_index(&self.forums_index_path())
-    }
-
-    /// Lists all board hashes in a forum.
-    pub fn list_boards(&self, forum_hash: &ContentHash) -> Result<Vec<ContentHash>> {
-        self.read_index(&self.boards_index_path(forum_hash))
-    }
-
-    /// Lists all thread hashes in a board.
-    pub fn list_threads(&self, board_hash: &ContentHash) -> Result<Vec<ContentHash>> {
-        self.read_index(&self.threads_index_path(board_hash))
-    }
-
-    /// Lists all post hashes in a thread.
-    pub fn list_posts(&self, thread_hash: &ContentHash) -> Result<Vec<ContentHash>> {
-        self.read_index(&self.posts_index_path(thread_hash))
-    }
-
-    /// Loads a forum by hash.
-    pub fn load_forum(&self, hash: &ContentHash) -> Result<Option<ForumGenesis>> {
-        let node = self.load_node(hash)?;
-        Ok(node.and_then(|n| n.as_forum_genesis().cloned()))
-    }
-
-    /// Loads a board by hash.
-    pub fn load_board(&self, hash: &ContentHash) -> Result<Option<BoardGenesis>> {
-        let node = self.load_node(hash)?;
-        Ok(node.and_then(|n| n.as_board_genesis().cloned()))
-    }
-
-    /// Loads a thread by hash.
-    pub fn load_thread(&self, hash: &ContentHash) -> Result<Option<ThreadRoot>> {
-        let node = self.load_node(hash)?;
-        Ok(node.and_then(|n| n.as_thread_root().cloned()))
-    }
-
-    /// Loads a post by hash.
-    pub fn load_post(&self, hash: &ContentHash) -> Result<Option<Post>> {
-        let node = self.load_node(hash)?;
-        Ok(node.and_then(|n| n.as_post().cloned()))
-    }
-
-    /// Gets the current heads for a forum's DAG.
-    ///
-    /// Heads are the latest nodes that have no children yet.
-    pub fn get_heads(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
-        let path = self.heads_path(forum_hash);
-        if !path.exists() {
-            return Ok(HashSet::new());
-        }
-
-        let hashes = self.read_index(&path)?;
-        Ok(hashes.into_iter().collect())
-    }
-
-    /// Updates the heads for a forum's DAG.
-    pub fn set_heads(&self, forum_hash: &ContentHash, heads: &HashSet<ContentHash>) -> Result<()> {
-        let path = self.heads_path(forum_hash);
-        let mut file = BufWriter::new(File::create(path)?);
-        for hash in heads {
-            writeln!(file, "{}", hash.to_hex())?;
-        }
         Ok(())
     }
 
-    /// Loads all nodes from storage into memory.
-    ///
-    /// This is useful for building complete DAG state.
-    pub fn load_all_nodes(&self) -> Result<HashMap<ContentHash, DagNode>> {
-        let mut nodes = HashMap::new();
-        let nodes_dir = self.root_dir.join("nodes");
+    /// Loads a conversation session.
+    pub fn load_conversation(
+        &self,
+        conversation_id: &[u8; CONVERSATION_ID_SIZE],
+    ) -> Result<Option<ConversationSession>> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_CONVERSATION_PREFIX.to_vec();
+        key.extend_from_slice(conversation_id);
 
-        if !nodes_dir.exists() {
-            return Ok(nodes);
-        }
-
-        // Iterate through prefix directories
-        for prefix_entry in fs::read_dir(&nodes_dir)? {
-            let prefix_entry = prefix_entry?;
-            if !prefix_entry.file_type()?.is_dir() {
-                continue;
+        match self.db.get_cf(&cf, &key) {
+            Ok(Some(value)) => {
+                let session: ConversationSession = bincode::deserialize(&value).map_err(|e| {
+                    PqpgpError::serialization(format!("Failed to deserialize conversation: {}", e))
+                })?;
+                Ok(Some(session))
             }
-
-            // Iterate through node files
-            for node_entry in fs::read_dir(prefix_entry.path())? {
-                let node_entry = node_entry?;
-                let path = node_entry.path();
-
-                if path.extension().and_then(|e| e.to_str()) != Some("node") {
-                    continue;
-                }
-
-                let bytes = fs::read(&path)?;
-                let node = DagNode::from_bytes(&bytes)?;
-                nodes.insert(*node.hash(), node);
-            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(PqpgpError::storage(format!(
+                "Failed to load conversation: {}",
+                e
+            ))),
         }
-
-        Ok(nodes)
     }
 
-    /// Loads all nodes for a specific forum.
-    pub fn load_forum_nodes(&self, forum_hash: &ContentHash) -> Result<Vec<DagNode>> {
-        let mut nodes = Vec::new();
+    /// Deletes a conversation session.
+    pub fn delete_conversation(&self, conversation_id: &[u8; CONVERSATION_ID_SIZE]) -> Result<()> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_CONVERSATION_PREFIX.to_vec();
+        key.extend_from_slice(conversation_id);
 
-        // Load forum genesis
-        if let Some(forum) = self.load_forum(forum_hash)? {
-            nodes.push(DagNode::from(forum));
-        } else {
-            return Ok(nodes);
+        self.db
+            .delete_cf(&cf, &key)
+            .map_err(|e| PqpgpError::storage(format!("Failed to delete conversation: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Stores the complete conversation manager state.
+    pub fn store_conversation_manager(&self, manager: &ConversationManager) -> Result<()> {
+        let cf = self.cf(CF_PRIVATE)?;
+
+        let value = bincode::serialize(manager).map_err(|e| {
+            PqpgpError::serialization(format!("Failed to serialize conversation manager: {}", e))
+        })?;
+
+        self.db
+            .put_cf(&cf, PRIVATE_CONVERSATION_MANAGER, &value)
+            .map_err(|e| {
+                PqpgpError::storage(format!("Failed to store conversation manager: {}", e))
+            })?;
+
+        Ok(())
+    }
+
+    /// Loads the complete conversation manager state.
+    pub fn load_conversation_manager(&self) -> Result<ConversationManager> {
+        let cf = self.cf(CF_PRIVATE)?;
+
+        match self.db.get_cf(&cf, PRIVATE_CONVERSATION_MANAGER) {
+            Ok(Some(value)) => {
+                let mut manager: ConversationManager =
+                    bincode::deserialize(&value).map_err(|e| {
+                        PqpgpError::serialization(format!(
+                            "Failed to deserialize conversation manager: {}",
+                            e
+                        ))
+                    })?;
+
+                // Rebuild indexes after loading
+                manager.rebuild_indexes();
+
+                Ok(manager)
+            }
+            Ok(None) => Ok(ConversationManager::new()),
+            Err(e) => Err(PqpgpError::storage(format!(
+                "Failed to load conversation manager: {}",
+                e
+            ))),
         }
+    }
 
-        // Load boards
-        for board_hash in self.list_boards(forum_hash)? {
-            if let Some(board) = self.load_board(&board_hash)? {
-                nodes.push(DagNode::from(board));
+    /// Lists all conversation IDs stored locally.
+    pub fn list_conversations(&self) -> Result<Vec<[u8; CONVERSATION_ID_SIZE]>> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let prefix = PRIVATE_CONVERSATION_PREFIX;
+        let iter = self.db.prefix_iterator_cf(&cf, prefix);
 
-                // Load threads
-                for thread_hash in self.list_threads(&board_hash)? {
-                    if let Some(thread) = self.load_thread(&thread_hash)? {
-                        nodes.push(DagNode::from(thread));
-
-                        // Load posts
-                        for post_hash in self.list_posts(&thread_hash)? {
-                            if let Some(post) = self.load_post(&post_hash)? {
-                                nodes.push(DagNode::from(post));
-                            }
-                        }
+        let mut ids = Vec::new();
+        for item in iter {
+            match item {
+                Ok((key, _)) => {
+                    if !key.starts_with(prefix) {
+                        break;
+                    }
+                    // Extract conversation ID from key (after prefix)
+                    let id_bytes = &key[prefix.len()..];
+                    if id_bytes.len() == CONVERSATION_ID_SIZE {
+                        let mut id = [0u8; CONVERSATION_ID_SIZE];
+                        id.copy_from_slice(id_bytes);
+                        ids.push(id);
                     }
                 }
+                Err(e) => {
+                    warn!("Error listing conversations: {}", e);
+                }
             }
         }
 
-        Ok(nodes)
+        Ok(ids)
     }
 
-    /// Returns the root directory path.
-    pub fn root_dir(&self) -> &Path {
-        &self.root_dir
+    /// Records that a one-time prekey has been consumed.
+    ///
+    /// This is used to prevent replay attacks. A consumed OTP should never
+    /// be accepted again.
+    pub fn record_consumed_otp(&self, identity_hash: &ContentHash, otp_id: u32) -> Result<()> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_CONSUMED_OTP_PREFIX.to_vec();
+        key.extend_from_slice(identity_hash.as_bytes());
+        key.push(b':');
+        key.extend_from_slice(&otp_id.to_le_bytes());
+
+        // Value is just a marker (empty or timestamp)
+        self.db
+            .put_cf(&cf, &key, [])
+            .map_err(|e| PqpgpError::storage(format!("Failed to record consumed OTP: {}", e)))?;
+
+        Ok(())
     }
 
-    /// Deletes all stored data.
+    /// Checks if a one-time prekey has been consumed.
+    pub fn is_otp_consumed(&self, identity_hash: &ContentHash, otp_id: u32) -> Result<bool> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut key = PRIVATE_CONSUMED_OTP_PREFIX.to_vec();
+        key.extend_from_slice(identity_hash.as_bytes());
+        key.push(b':');
+        key.extend_from_slice(&otp_id.to_le_bytes());
+
+        self.db
+            .get_cf(&cf, &key)
+            .map(|v| v.is_some())
+            .map_err(|e| PqpgpError::storage(format!("Failed to check consumed OTP: {}", e)))
+    }
+
+    /// Lists all consumed OTPs for an encryption identity.
+    pub fn list_consumed_otps(&self, identity_hash: &ContentHash) -> Result<Vec<u32>> {
+        let cf = self.cf(CF_PRIVATE)?;
+        let mut prefix = PRIVATE_CONSUMED_OTP_PREFIX.to_vec();
+        prefix.extend_from_slice(identity_hash.as_bytes());
+        prefix.push(b':');
+
+        let iter = self.db.prefix_iterator_cf(&cf, &prefix);
+
+        let mut otps = Vec::new();
+        for item in iter {
+            match item {
+                Ok((key, _)) => {
+                    if !key.starts_with(&prefix) {
+                        break;
+                    }
+                    // Extract OTP ID from key (after prefix)
+                    let id_bytes = &key[prefix.len()..];
+                    if id_bytes.len() == 4 {
+                        let id = u32::from_le_bytes([
+                            id_bytes[0],
+                            id_bytes[1],
+                            id_bytes[2],
+                            id_bytes[3],
+                        ]);
+                        otps.push(id);
+                    }
+                }
+                Err(e) => {
+                    warn!("Error listing consumed OTPs: {}", e);
+                }
+            }
+        }
+
+        Ok(otps)
+    }
+
+    /// Finds the next available OTP ID for generating new prekeys.
+    pub fn next_available_otp_id(&self, identity_hash: &ContentHash) -> Result<u32> {
+        let consumed = self.list_consumed_otps(identity_hash)?;
+        let max_consumed = consumed.into_iter().max().unwrap_or(1);
+        Ok(max_consumed + 1)
+    }
+
+    /// Clears all data from the database.
     ///
     /// Use with caution!
     pub fn clear(&self) -> Result<()> {
-        if self.root_dir.exists() {
-            fs::remove_dir_all(&self.root_dir)?;
+        // Clear each column family
+        for cf_name in [CF_NODES, CF_FORUMS, CF_HEADS, CF_META, CF_PRIVATE] {
+            let cf = self.cf(cf_name)?;
+            let iter = self.db.iterator_cf(&cf, rocksdb::IteratorMode::Start);
+
+            for (key, _) in iter.flatten() {
+                self.db.delete_cf(&cf, &key).map_err(|e| {
+                    PqpgpError::storage(format!("Failed to clear {}: {}", cf_name, e))
+                })?;
+            }
         }
-        // Recreate directory structure
-        fs::create_dir_all(self.root_dir.join("nodes"))?;
-        fs::create_dir_all(self.root_dir.join("indexes/boards"))?;
-        fs::create_dir_all(self.root_dir.join("indexes/threads"))?;
-        fs::create_dir_all(self.root_dir.join("indexes/posts"))?;
-        fs::create_dir_all(self.root_dir.join("heads"))?;
+
+        info!("Cleared all forum storage data");
         Ok(())
     }
+}
 
-    /// Removes a specific forum and all its data from local storage.
-    ///
-    /// This removes:
-    /// - The forum genesis node
-    /// - All boards, threads, and posts in the forum
-    /// - The forum's heads file
-    /// - Index entries for the forum
-    pub fn remove_forum(&self, forum_hash: &ContentHash) -> Result<()> {
-        // Load all nodes for this forum so we can delete them
-        let forum_nodes = self.load_forum_nodes(forum_hash)?;
-
-        // Delete each node file
-        for node in &forum_nodes {
-            let path = self.node_path(node.hash());
-            if path.exists() {
-                fs::remove_file(&path)?;
-            }
-        }
-
-        // Delete board indexes for this forum
-        let boards_index_path = self.boards_index_path(forum_hash);
-        if boards_index_path.exists() {
-            // First get board hashes to delete their thread indexes
-            let board_hashes = self.read_index(&boards_index_path)?;
-            for board_hash in &board_hashes {
-                // Delete thread indexes for this board
-                let threads_index_path = self.threads_index_path(board_hash);
-                if threads_index_path.exists() {
-                    // Get thread hashes to delete their post indexes
-                    let thread_hashes = self.read_index(&threads_index_path)?;
-                    for thread_hash in &thread_hashes {
-                        let posts_index_path = self.posts_index_path(thread_hash);
-                        if posts_index_path.exists() {
-                            fs::remove_file(&posts_index_path)?;
-                        }
-                    }
-                    fs::remove_file(&threads_index_path)?;
-                }
-            }
-            fs::remove_file(&boards_index_path)?;
-        }
-
-        // Delete heads file
-        let heads_path = self.heads_path(forum_hash);
-        if heads_path.exists() {
-            fs::remove_file(&heads_path)?;
-        }
-
-        // Remove forum from forums.idx
-        let forums_index_path = self.forums_index_path();
-        if forums_index_path.exists() {
-            let forums = self.read_index(&forums_index_path)?;
-            let filtered: Vec<_> = forums.iter().filter(|h| *h != forum_hash).collect();
-            let mut file = BufWriter::new(File::create(&forums_index_path)?);
-            for hash in filtered {
-                writeln!(file, "{}", hash.to_hex())?;
-            }
-        }
-
-        Ok(())
-    }
+/// Helper to compute fingerprint from identity bytes.
+///
+/// Computes a fingerprint from identity bytes using the same algorithm as PublicKey::fingerprint().
+/// This ensures fingerprints match between keys loaded from the keyring and identities
+/// stored in forum nodes.
+fn fingerprint_from_identity(identity: &[u8]) -> String {
+    use crate::crypto::PublicKey;
+    let fingerprint = PublicKey::fingerprint_from_mldsa87_bytes(identity);
+    hex::encode(&fingerprint[..8]) // First 16 hex chars
 }
 
 #[cfg(test)]
@@ -445,10 +1380,8 @@ mod tests {
 
     #[test]
     fn test_storage_creation() {
-        let (storage, _temp_dir) = create_test_storage();
-        assert!(storage.root_dir().exists());
-        assert!(storage.root_dir().join("nodes").exists());
-        assert!(storage.root_dir().join("indexes").exists());
+        let (_storage, _temp_dir) = create_test_storage();
+        // If we get here, storage was created successfully
     }
 
     #[test]
@@ -456,15 +1389,27 @@ mod tests {
         let (storage, _temp_dir) = create_test_storage();
         let keypair = create_test_keypair();
         let forum = create_test_forum(&keypair);
+        let forum_hash = *forum.hash();
 
-        // Store
+        // Store metadata first
+        let metadata = ForumMetadata {
+            name: forum.name().to_string(),
+            description: forum.description().to_string(),
+            created_at: forum.created_at(),
+            owner_identity: forum.creator_identity().to_vec(),
+        };
         storage
-            .store_node(&DagNode::from(forum.clone()))
+            .store_forum_metadata(&forum_hash, &metadata)
+            .unwrap();
+
+        // Store node
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(forum.clone()))
             .expect("Failed to store forum");
 
         // Load
         let loaded = storage
-            .load_forum(forum.hash())
+            .load_forum(&forum_hash)
             .expect("Failed to load forum")
             .expect("Forum not found");
 
@@ -477,9 +1422,10 @@ mod tests {
         let (storage, _temp_dir) = create_test_storage();
         let keypair = create_test_keypair();
         let forum = create_test_forum(&keypair);
+        let forum_hash = *forum.hash();
 
         let board = BoardGenesis::create(
-            *forum.hash(),
+            forum_hash,
             "Test Board".to_string(),
             "A test board".to_string(),
             vec!["tag1".to_string()],
@@ -489,11 +1435,26 @@ mod tests {
         )
         .expect("Failed to create board");
 
-        storage.store_node(&DagNode::from(forum.clone())).unwrap();
-        storage.store_node(&DagNode::from(board.clone())).unwrap();
+        // Store metadata first
+        let metadata = ForumMetadata {
+            name: forum.name().to_string(),
+            description: forum.description().to_string(),
+            created_at: forum.created_at(),
+            owner_identity: forum.creator_identity().to_vec(),
+        };
+        storage
+            .store_forum_metadata(&forum_hash, &metadata)
+            .unwrap();
+
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(forum))
+            .unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(board.clone()))
+            .unwrap();
 
         let loaded = storage
-            .load_board(board.hash())
+            .load_board(&forum_hash, board.hash())
             .unwrap()
             .expect("Board not found");
 
@@ -508,8 +1469,21 @@ mod tests {
         let forum1 = create_test_forum(&keypair);
         let forum2 = create_test_forum(&keypair);
 
-        storage.store_node(&DagNode::from(forum1.clone())).unwrap();
-        storage.store_node(&DagNode::from(forum2.clone())).unwrap();
+        // Store metadata for both forums
+        for forum in [&forum1, &forum2] {
+            let metadata = ForumMetadata {
+                name: forum.name().to_string(),
+                description: forum.description().to_string(),
+                created_at: forum.created_at(),
+                owner_identity: forum.creator_identity().to_vec(),
+            };
+            storage
+                .store_forum_metadata(forum.hash(), &metadata)
+                .unwrap();
+            storage
+                .store_node_for_forum(forum.hash(), &DagNode::from(forum.clone()))
+                .unwrap();
+        }
 
         let forums = storage.list_forums().unwrap();
         assert_eq!(forums.len(), 2);
@@ -518,13 +1492,14 @@ mod tests {
     }
 
     #[test]
-    fn test_list_boards() {
+    fn test_get_boards() {
         let (storage, _temp_dir) = create_test_storage();
         let keypair = create_test_keypair();
         let forum = create_test_forum(&keypair);
+        let forum_hash = *forum.hash();
 
         let board1 = BoardGenesis::create(
-            *forum.hash(),
+            forum_hash,
             "Board 1".to_string(),
             "".to_string(),
             vec![],
@@ -535,7 +1510,7 @@ mod tests {
         .unwrap();
 
         let board2 = BoardGenesis::create(
-            *forum.hash(),
+            forum_hash,
             "Board 2".to_string(),
             "".to_string(),
             vec![],
@@ -545,11 +1520,28 @@ mod tests {
         )
         .unwrap();
 
-        storage.store_node(&DagNode::from(forum.clone())).unwrap();
-        storage.store_node(&DagNode::from(board1.clone())).unwrap();
-        storage.store_node(&DagNode::from(board2.clone())).unwrap();
+        // Store metadata
+        let metadata = ForumMetadata {
+            name: forum.name().to_string(),
+            description: forum.description().to_string(),
+            created_at: forum.created_at(),
+            owner_identity: forum.creator_identity().to_vec(),
+        };
+        storage
+            .store_forum_metadata(&forum_hash, &metadata)
+            .unwrap();
 
-        let boards = storage.list_boards(forum.hash()).unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(forum))
+            .unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(board1))
+            .unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(board2))
+            .unwrap();
+
+        let boards = storage.get_boards(&forum_hash).unwrap();
         assert_eq!(boards.len(), 2);
     }
 
@@ -558,10 +1550,25 @@ mod tests {
         let (storage, _temp_dir) = create_test_storage();
         let keypair = create_test_keypair();
         let forum = create_test_forum(&keypair);
+        let forum_hash = *forum.hash();
 
-        assert!(!storage.node_exists(forum.hash()));
-        storage.store_node(&DagNode::from(forum.clone())).unwrap();
-        assert!(storage.node_exists(forum.hash()));
+        assert!(!storage.node_exists(&forum_hash, forum.hash()).unwrap());
+
+        // Store metadata
+        let metadata = ForumMetadata {
+            name: forum.name().to_string(),
+            description: forum.description().to_string(),
+            created_at: forum.created_at(),
+            owner_identity: forum.creator_identity().to_vec(),
+        };
+        storage
+            .store_forum_metadata(&forum_hash, &metadata)
+            .unwrap();
+
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(forum.clone()))
+            .unwrap();
+        assert!(storage.node_exists(&forum_hash, forum.hash()).unwrap());
     }
 
     #[test]
@@ -584,39 +1591,14 @@ mod tests {
     }
 
     #[test]
-    fn test_load_all_nodes() {
-        let (storage, _temp_dir) = create_test_storage();
-        let keypair = create_test_keypair();
-        let forum = create_test_forum(&keypair);
-
-        let board = BoardGenesis::create(
-            *forum.hash(),
-            "Board".to_string(),
-            "".to_string(),
-            vec![],
-            keypair.public_key(),
-            keypair.private_key(),
-            None,
-        )
-        .unwrap();
-
-        storage.store_node(&DagNode::from(forum.clone())).unwrap();
-        storage.store_node(&DagNode::from(board.clone())).unwrap();
-
-        let all_nodes = storage.load_all_nodes().unwrap();
-        assert_eq!(all_nodes.len(), 2);
-        assert!(all_nodes.contains_key(forum.hash()));
-        assert!(all_nodes.contains_key(board.hash()));
-    }
-
-    #[test]
     fn test_load_forum_nodes() {
         let (storage, _temp_dir) = create_test_storage();
         let keypair = create_test_keypair();
         let forum = create_test_forum(&keypair);
+        let forum_hash = *forum.hash();
 
         let board = BoardGenesis::create(
-            *forum.hash(),
+            forum_hash,
             "Board".to_string(),
             "".to_string(),
             vec![],
@@ -647,12 +1629,31 @@ mod tests {
         )
         .unwrap();
 
-        storage.store_node(&DagNode::from(forum.clone())).unwrap();
-        storage.store_node(&DagNode::from(board)).unwrap();
-        storage.store_node(&DagNode::from(thread)).unwrap();
-        storage.store_node(&DagNode::from(post)).unwrap();
+        // Store metadata
+        let metadata = ForumMetadata {
+            name: forum.name().to_string(),
+            description: forum.description().to_string(),
+            created_at: forum.created_at(),
+            owner_identity: forum.creator_identity().to_vec(),
+        };
+        storage
+            .store_forum_metadata(&forum_hash, &metadata)
+            .unwrap();
 
-        let nodes = storage.load_forum_nodes(forum.hash()).unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(forum))
+            .unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(board))
+            .unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(thread))
+            .unwrap();
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(post))
+            .unwrap();
+
+        let nodes = storage.load_forum_nodes(&forum_hash).unwrap();
         assert_eq!(nodes.len(), 4);
     }
 
@@ -661,12 +1662,53 @@ mod tests {
         let (storage, _temp_dir) = create_test_storage();
         let keypair = create_test_keypair();
         let forum = create_test_forum(&keypair);
+        let forum_hash = *forum.hash();
 
-        storage.store_node(&DagNode::from(forum.clone())).unwrap();
-        assert!(storage.node_exists(forum.hash()));
+        // Store metadata
+        let metadata = ForumMetadata {
+            name: forum.name().to_string(),
+            description: forum.description().to_string(),
+            created_at: forum.created_at(),
+            owner_identity: forum.creator_identity().to_vec(),
+        };
+        storage
+            .store_forum_metadata(&forum_hash, &metadata)
+            .unwrap();
+
+        storage
+            .store_node_for_forum(&forum_hash, &DagNode::from(forum.clone()))
+            .unwrap();
+        assert!(storage.node_exists(&forum_hash, forum.hash()).unwrap());
 
         storage.clear().unwrap();
-        assert!(!storage.node_exists(forum.hash()));
-        assert!(storage.root_dir().join("nodes").exists());
+        assert!(!storage.node_exists(&forum_hash, forum.hash()).unwrap());
+    }
+
+    #[test]
+    fn test_consumed_otps() {
+        let (storage, _temp_dir) = create_test_storage();
+        let identity_hash = ContentHash::from_bytes([1u8; 64]);
+
+        // Initially no OTPs consumed
+        assert!(!storage.is_otp_consumed(&identity_hash, 1).unwrap());
+
+        // Record consumed OTP
+        storage.record_consumed_otp(&identity_hash, 1).unwrap();
+        storage.record_consumed_otp(&identity_hash, 3).unwrap();
+
+        // Check consumption
+        assert!(storage.is_otp_consumed(&identity_hash, 1).unwrap());
+        assert!(!storage.is_otp_consumed(&identity_hash, 2).unwrap());
+        assert!(storage.is_otp_consumed(&identity_hash, 3).unwrap());
+
+        // List consumed OTPs
+        let consumed = storage.list_consumed_otps(&identity_hash).unwrap();
+        assert_eq!(consumed.len(), 2);
+        assert!(consumed.contains(&1));
+        assert!(consumed.contains(&3));
+
+        // Next available ID
+        let next = storage.next_available_otp_id(&identity_hash).unwrap();
+        assert_eq!(next, 4);
     }
 }

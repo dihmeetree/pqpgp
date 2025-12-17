@@ -227,6 +227,20 @@ fn validate_content_limits(node: &DagNode) -> Option<String> {
                 return Some("Edit timestamp is unreasonably old".to_string());
             }
         }
+        DagNode::EncryptionIdentity(identity) => {
+            // Encryption identities have size limits enforced by the library
+            // Just validate timestamp for reasonableness
+            if identity.content.created_at < MIN_VALID_TIMESTAMP_MS {
+                return Some("Encryption identity timestamp is unreasonably old".to_string());
+            }
+        }
+        DagNode::SealedPrivateMessage(sealed) => {
+            // Sealed messages have payload size enforced by the library (100KB max)
+            // Just validate timestamp for reasonableness
+            if sealed.content.created_at < MIN_VALID_TIMESTAMP_MS {
+                return Some("Sealed message timestamp is unreasonably old".to_string());
+            }
+        }
     }
     None
 }

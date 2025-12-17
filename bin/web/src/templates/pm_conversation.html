@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+
+{% block title %}Conversation - {{ forum_name }}{% endblock %}
+
+{% block content %}
+<div class="card">
+    <h2>Conversation with {{ peer_short }}</h2>
+    <p>
+        <a href="/forum/{{ forum_hash }}/pm">&larr; Back to Inbox</a> |
+        <a href="/forum/{{ forum_hash }}">&larr; Back to Forum</a>
+    </p>
+    <p>
+        <strong>Peer:</strong> <span class="key-id">{{ peer_fingerprint }}</span><br>
+        <strong>Conversation ID:</strong> <span class="key-id">{{ conversation_id }}</span>
+    </p>
+
+    {% if has_error %}
+    <div class="alert alert-error">{{ error.as_ref().unwrap() }}</div>
+    {% endif %}
+
+    {% if has_result %}
+    <div class="alert alert-success">{{ result.as_ref().unwrap() }}</div>
+    {% endif %}
+</div>
+
+<!-- Messages -->
+<div class="card">
+    <h2>Messages</h2>
+    {% if messages.is_empty() %}
+    <p style="color: #718096;">No messages in this conversation yet.</p>
+    {% else %}
+    <div class="message-list" style="max-height: 500px; overflow-y: auto;">
+        {% for msg in messages %}
+        <div class="message {% if msg.is_outgoing %}message-outgoing{% else %}message-incoming{% endif %}"
+             style="margin-bottom: 15px; padding: 15px; border-radius: 8px;
+                    {% if msg.is_outgoing %}background-color: #e6f2ff; margin-left: 50px;{% else %}background-color: #f0f0f0; margin-right: 50px;{% endif %}">
+            <div style="font-size: 12px; color: #718096; margin-bottom: 5px;">
+                {% if msg.is_outgoing %}You{% else %}{{ peer_short }}{% endif %} - {{ msg.timestamp_display }}
+                {% match msg.reply_to %}
+                {% when Some with (reply_id) %}
+                <span style="margin-left: 10px;">(Reply to {{ reply_id|truncate(8) }}...)</span>
+                {% when None %}
+                {% endmatch %}
+            </div>
+            {% match msg.subject %}
+            {% when Some with (subj) %}
+            <div style="font-weight: 600; margin-bottom: 5px;">{{ subj }}</div>
+            {% when None %}
+            {% endmatch %}
+            <div style="white-space: pre-wrap;">{{ msg.body }}</div>
+            <div style="font-size: 11px; color: #a0a0a0; margin-top: 5px;">
+                ID: {{ msg.message_id|truncate(16) }}...
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+    {% endif %}
+</div>
+
+<!-- Reply Form -->
+<div class="card">
+    <h2>Send Reply</h2>
+    <form method="post" action="/forum/{{ forum_hash }}/pm/conversation/{{ conversation_id }}/reply">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="form-group">
+            <label for="subject">Subject (optional):</label>
+            <input type="text" name="subject" id="subject" maxlength="256" placeholder="Reply subject">
+        </div>
+        <div class="form-group">
+            <label for="body">Message:</label>
+            <textarea name="body" id="body" required placeholder="Your reply..." style="height: 120px;"></textarea>
+        </div>
+        {% if !messages.is_empty() %}
+        <div class="form-group">
+            <label for="reply_to">Reply to message:</label>
+            <select name="reply_to" id="reply_to">
+                <option value="">-- No specific message --</option>
+                {% for msg in messages %}
+                <option value="{{ msg.message_id }}">{{ msg.timestamp_display }} - {{ msg.body|truncate(50) }}...</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% endif %}
+        <div class="form-group">
+            <label for="signing_key">Sign with Key:</label>
+            <select name="signing_key" id="signing_key" required>
+                {% for key in signing_keys %}
+                <option value="{{ key.key_id }}">{{ key.user_id }} ({{ key.fingerprint }})</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label for="password">Key Password (if protected):</label>
+            <input type="password" name="password" id="password" placeholder="Leave empty if not password-protected">
+        </div>
+        <button type="submit" class="btn">Send Reply</button>
+    </form>
+</div>
+{% endblock %}

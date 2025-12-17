@@ -449,7 +449,9 @@ impl PermissionBuilder {
             DagNode::BoardGenesis(_)
             | DagNode::ThreadRoot(_)
             | DagNode::Post(_)
-            | DagNode::Edit(_) => {}
+            | DagNode::Edit(_)
+            | DagNode::EncryptionIdentity(_)
+            | DagNode::SealedPrivateMessage(_) => {}
         }
 
         Ok(())

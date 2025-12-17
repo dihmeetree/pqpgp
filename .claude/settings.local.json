@@ -15,7 +15,9 @@
       "Bash(cargo fmt:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(wc:*)",
+      "Bash(RUST_BACKTRACE=1 cargo test:*)"
     ]
   }
 }

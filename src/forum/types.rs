@@ -143,6 +143,12 @@ pub enum NodeType {
     ModAction = 10,
     /// Edit node - update forum/board metadata.
     Edit = 11,
+    /// Encryption identity - publishes a user's encryption keys for private messaging.
+    /// Contains ML-KEM-1024 prekey bundle for X3DH key agreement.
+    EncryptionIdentity = 20,
+    /// Sealed private message - end-to-end encrypted message with hidden metadata.
+    /// Only the recipient can decrypt and discover the sender.
+    SealedPrivateMessage = 21,
 }
 
 impl fmt::Display for NodeType {
@@ -154,6 +160,8 @@ impl fmt::Display for NodeType {
             NodeType::Post => write!(f, "Post"),
             NodeType::ModAction => write!(f, "ModAction"),
             NodeType::Edit => write!(f, "Edit"),
+            NodeType::EncryptionIdentity => write!(f, "EncryptionIdentity"),
+            NodeType::SealedPrivateMessage => write!(f, "SealedPrivateMessage"),
         }
     }
 }
@@ -301,6 +309,9 @@ mod tests {
         assert_eq!(NodeType::ThreadRoot as u8, 3);
         assert_eq!(NodeType::Post as u8, 4);
         assert_eq!(NodeType::ModAction as u8, 10);
+        assert_eq!(NodeType::Edit as u8, 11);
+        assert_eq!(NodeType::EncryptionIdentity as u8, 20);
+        assert_eq!(NodeType::SealedPrivateMessage as u8, 21);
     }
 
     #[test]

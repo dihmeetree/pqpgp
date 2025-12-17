@@ -3,7 +3,10 @@
 {% block title %}{{ forum_name }} - PQPGP Forums{% endblock %}
 
 {% block content %}
-<p><a href="/forum" class="btn">&larr; Back to Forums</a></p>
+<p>
+    <a href="/forum" class="btn">&larr; Back to Forums</a>
+    <a href="/forum/{{ forum_hash }}/pm" class="btn" style="margin-left: 10px;">Private Messages</a>
+</p>
 
 <div class="card">
     <h2>{{ forum_name }}</h2>

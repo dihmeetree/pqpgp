@@ -76,6 +76,25 @@ impl fmt::Display for SignedPreKey {
 }
 
 impl SignedPreKey {
+    /// Creates a new signed prekey from raw components.
+    ///
+    /// This is used when constructing prekeys outside the PreKeyGenerator,
+    /// such as in the forum's EncryptionIdentityGenerator.
+    ///
+    /// # Arguments
+    /// * `id` - Unique prekey identifier
+    /// * `public_key` - ML-KEM-1024 public key bytes
+    /// * `signature` - Signature from identity key
+    /// * `created` - Creation timestamp (Unix seconds)
+    pub fn new_raw(id: PreKeyId, public_key: Vec<u8>, signature: Signature, created: u64) -> Self {
+        Self {
+            id,
+            public_key,
+            signature,
+            created,
+        }
+    }
+
     /// Returns the prekey ID.
     pub fn id(&self) -> PreKeyId {
         self.id
@@ -188,6 +207,18 @@ impl fmt::Display for OneTimePreKey {
 }
 
 impl OneTimePreKey {
+    /// Creates a new one-time prekey from raw components.
+    ///
+    /// This is used when constructing prekeys outside the PreKeyGenerator,
+    /// such as in the forum's EncryptionIdentityGenerator.
+    ///
+    /// # Arguments
+    /// * `id` - Unique prekey identifier
+    /// * `public_key` - ML-KEM-1024 public key bytes
+    pub fn new_raw(id: PreKeyId, public_key: Vec<u8>) -> Self {
+        Self { id, public_key }
+    }
+
     /// Returns the prekey ID.
     pub fn id(&self) -> PreKeyId {
         self.id

@@ -85,7 +85,12 @@ impl ForumClient {
         response
             .missing_hashes
             .iter()
-            .filter(|hash| !self.storage.node_exists(hash))
+            .filter(|hash| {
+                !self
+                    .storage
+                    .node_exists(&response.forum_hash, hash)
+                    .unwrap_or(false)
+            })
             .copied()
             .collect()
     }

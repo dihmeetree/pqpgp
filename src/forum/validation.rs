@@ -837,7 +837,96 @@ pub fn validate_node(node: &DagNode, ctx: &ValidationContext) -> Result<Validati
         DagNode::Post(post) => validate_post(post, ctx),
         DagNode::ModAction(action) => validate_mod_action(action, ctx),
         DagNode::Edit(edit) => validate_edit(edit, ctx),
+        DagNode::EncryptionIdentity(identity) => validate_encryption_identity(identity, ctx),
+        DagNode::SealedPrivateMessage(message) => validate_sealed_private_message(message, ctx),
     }
+}
+
+/// Validates an encryption identity node.
+///
+/// Checks:
+/// - Content hash matches
+/// - Signature is valid
+/// - Forum exists
+/// - ML-KEM key sizes are valid
+fn validate_encryption_identity(
+    identity: &crate::forum::EncryptionIdentity,
+    ctx: &ValidationContext,
+) -> Result<ValidationResult> {
+    let mut result = ValidationResult::ok();
+
+    // Reconstruct public key using key_id from the signature
+    let public_key = PublicKey::from_mldsa87_bytes_with_id(
+        identity.owner_signing_key(),
+        identity.signature.key_id,
+    )
+    .map_err(|_| PqpgpError::validation("Invalid owner public key in EncryptionIdentity"))?;
+
+    // Verify the node (hash and signature)
+    if let Err(e) = identity.verify(&public_key) {
+        result.add_error(format!("EncryptionIdentity verification failed: {}", e));
+        return Ok(result);
+    }
+
+    // Verify forum exists
+    let forum_hash = identity.forum_hash();
+    if !ctx.node_exists(forum_hash) {
+        result.add_error(format!("Forum {} does not exist", forum_hash.short()));
+    }
+
+    // Timestamp validation
+    let timestamp_ms = identity.created_at();
+    if timestamp_ms < MIN_VALID_TIMESTAMP_MS {
+        result.add_error("EncryptionIdentity timestamp is unreasonably old or invalid".to_string());
+    }
+    if timestamp_ms > ctx.current_time_ms + MAX_CLOCK_SKEW_MS {
+        result.add_error("EncryptionIdentity timestamp is too far in the future".to_string());
+    }
+
+    Ok(result)
+}
+
+/// Validates a sealed private message node.
+///
+/// Checks:
+/// - Content hash matches
+/// - Payload size is within limits
+/// - Forum exists
+/// - Timestamp is reasonable
+///
+/// Note: We cannot validate encrypted content - only the recipient can do that.
+fn validate_sealed_private_message(
+    message: &crate::forum::SealedPrivateMessage,
+    ctx: &ValidationContext,
+) -> Result<ValidationResult> {
+    let mut result = ValidationResult::ok();
+
+    // Verify hash
+    if let Err(e) = message.verify_hash() {
+        result.add_error(format!(
+            "SealedPrivateMessage hash verification failed: {}",
+            e
+        ));
+        return Ok(result);
+    }
+
+    // Verify forum exists
+    let forum_hash = message.forum_hash();
+    if !ctx.node_exists(forum_hash) {
+        result.add_error(format!("Forum {} does not exist", forum_hash.short()));
+    }
+
+    // Timestamp validation
+    let timestamp_ms = message.created_at();
+    if timestamp_ms < MIN_VALID_TIMESTAMP_MS {
+        result
+            .add_error("SealedPrivateMessage timestamp is unreasonably old or invalid".to_string());
+    }
+    if timestamp_ms > ctx.current_time_ms + MAX_CLOCK_SKEW_MS {
+        result.add_error("SealedPrivateMessage timestamp is too far in the future".to_string());
+    }
+
+    Ok(result)
 }
 
 #[cfg(test)]
