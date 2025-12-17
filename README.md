@@ -192,12 +192,12 @@ PQPGP includes a cryptographically-secured forum system built on a Directed Acyc
 
 **Moderation Hierarchy:**
 
-| Role | Permissions |
-|------|-------------|
-| **Forum Owner** | Create boards, add/remove forum moderators, edit forum, full control |
+| Role                | Permissions                                                                 |
+| ------------------- | --------------------------------------------------------------------------- |
+| **Forum Owner**     | Create boards, add/remove forum moderators, edit forum, full control        |
 | **Forum Moderator** | Create boards, add/remove board moderators, hide/unhide boards, edit boards |
-| **Board Moderator** | Hide/unhide threads and posts within assigned board only |
-| **Member** | Create threads and posts |
+| **Board Moderator** | Hide/unhide threads and posts within assigned board only                    |
+| **Member**          | Create threads and posts                                                    |
 
 **Moderation Actions:**
 
@@ -233,14 +233,14 @@ Forums support end-to-end encrypted private messages using a Signal-inspired sea
 
 **Privacy Properties:**
 
-| Property | How Achieved |
-|----------|--------------|
-| Content hidden | AES-256-GCM encryption |
-| Sender hidden | Sealed sender - only recipient knows |
-| Recipient hidden | Trial decryption - server can't tell who can decrypt |
-| Forward secrecy | X3DH + Double Ratchet |
-| Post-compromise security | Double Ratchet key rotation |
-| Deniability | No signatures on message content |
+| Property                 | How Achieved                                         |
+| ------------------------ | ---------------------------------------------------- |
+| Content hidden           | AES-256-GCM encryption                               |
+| Sender hidden            | Sealed sender - only recipient knows                 |
+| Recipient hidden         | Trial decryption - server can't tell who can decrypt |
+| Forward secrecy          | X3DH + Double Ratchet                                |
+| Post-compromise security | Double Ratchet key rotation                          |
+| Deniability              | No signatures on message content                     |
 
 **DAG Sync Protocol:**
 
