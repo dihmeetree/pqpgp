@@ -226,7 +226,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     // Initialize forum persistence using RocksDB
     let forum_data_path =
-        std::env::var("PQPGP_FORUM_DATA").unwrap_or_else(|_| "pqpgp_web_forum_data".to_string());
+        std::env::var("PQPGP_FORUM_DATA").unwrap_or_else(|_| "pqpgp_forum_data".to_string());
     let forum_persistence = Arc::new(
         ForumStorage::new(&forum_data_path).expect("Failed to initialize forum persistence"),
     );

@@ -496,7 +496,7 @@ bin/web/
 **Web Client Forum Storage (RocksDB):**
 
 ```
-pqpgp_web_forum_data/
+pqpgp_forum_data/
 └── forum_db/                    # RocksDB database
     ├── Column: nodes            # {forum_hash}:{node_hash} → DagNode
     ├── Column: forums           # {forum_hash} → ForumMetadata
