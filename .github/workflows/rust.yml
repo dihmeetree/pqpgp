@@ -29,8 +29,8 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     env:
-      # Reduce parallelism for RocksDB build to avoid resource exhaustion
-      CARGO_BUILD_JOBS: 2
+      # Use system RocksDB library instead of compiling from source
+      ROCKSDB_LIB_DIR: /usr/lib/x86_64-linux-gnu
     steps:
       # Checkout the repository code
       - uses: actions/checkout@v4
