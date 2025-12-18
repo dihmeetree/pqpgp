@@ -1,7 +1,8 @@
 //! Benchmarks for post-quantum cryptographic operations.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use pqpgp::crypto::{decrypt_message, encrypt_message, sign_message, verify_signature, KeyPair};
+use std::hint::black_box;
 
 fn bench_key_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("key_generation");

@@ -71,3 +71,23 @@ path = "src/lib.rs"
 [[bench]]
 name = "crypto_bench"
 harness = false
+
+# Optimized release builds
+[profile.release]
+lto = true              # Link-Time Optimization - slower builds, faster/smaller binaries
+codegen-units = 1       # Better optimization (default is 16 for parallel compilation)
+strip = true            # Strip symbols from binary
+
+# Release build with debug symbols for profiling
+[profile.release-with-debug]
+inherits = "release"
+debug = true
+
+# Faster dev builds with some optimization
+[profile.dev]
+opt-level = 1
+debug = true
+
+# Optimize dependencies even in dev builds for faster runtime
+[profile.dev.package."*"]
+opt-level = 2

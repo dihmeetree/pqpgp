@@ -28,9 +28,18 @@ env:
 jobs:
   ci:
     runs-on: ubuntu-latest
+    env:
+      # Reduce parallelism for RocksDB build to avoid resource exhaustion
+      CARGO_BUILD_JOBS: 2
     steps:
       # Checkout the repository code
       - uses: actions/checkout@v4
+
+      # Install RocksDB dependencies for faster builds
+      - name: Install RocksDB dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librocksdb-dev libclang-dev
 
       # Install the latest stable Rust toolchain
       - name: Install Rust
