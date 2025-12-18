@@ -741,7 +741,7 @@ pub async fn forum_list_page(
     let cursor = pagination.get_cursor();
     let limit = pagination.get_limit();
 
-    // Get locally synced forums with pagination
+    // Get locally synced forums with pagination (ForumSummary includes board_count for O(1) access)
     let paginated_result = app_state
         .forum_persistence
         .list_forums_paginated(cursor.as_ref(), limit)
@@ -757,24 +757,16 @@ pub async fn forum_list_page(
     let has_more = paginated_result.next_cursor.is_some();
     let total_forums = paginated_result.total_count.unwrap_or(0);
 
+    // ForumSummary already includes effective name/description and board_count
     let forums: Vec<ForumDisplayInfo> = paginated_result
         .items
         .iter()
-        .map(|(hash, metadata)| {
-            // Get effective name/description after applying edits
-            let (name, description) = get_effective_forum_info(
-                &app_state.forum_persistence,
-                hash,
-                &metadata.name,
-                &metadata.description,
-            );
-
-            ForumDisplayInfo {
-                hash: hash.to_hex(),
-                name,
-                description,
-                created_at_display: format_timestamp(metadata.created_at),
-            }
+        .map(|summary| ForumDisplayInfo {
+            hash: summary.hash.to_hex(),
+            name: summary.effective_name.clone(),
+            description: summary.effective_description.clone(),
+            created_at_display: format_timestamp(summary.metadata.created_at),
+            board_count: summary.board_count,
         })
         .collect();
 

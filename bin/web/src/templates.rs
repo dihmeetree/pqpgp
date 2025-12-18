@@ -178,6 +178,7 @@ pub struct ForumDisplayInfo {
     pub name: String,
     pub description: String,
     pub created_at_display: String,
+    pub board_count: usize,
 }
 
 /// Board info for display

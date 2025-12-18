@@ -85,8 +85,8 @@ pub use sealed_message::{
 };
 pub use state::{ForumRelayState, ForumState};
 pub use storage::{
-    BoardSummary, Cursor, ForumMetadata, ForumStorage, PaginatedResult, PostSummary, ThreadSummary,
-    DEFAULT_PAGE_SIZE,
+    BoardSummary, Cursor, ForumMetadata, ForumStorage, ForumSummary, PaginatedResult, PostSummary,
+    ThreadSummary, DEFAULT_PAGE_SIZE,
 };
 pub use sync::{
     ExportForumRequest, ExportForumResponse, FetchNodesRequest, FetchNodesResponse, SerializedNode,

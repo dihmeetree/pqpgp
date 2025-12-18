@@ -197,20 +197,34 @@ pqpgp_relay_data/
 ```
 pqpgp_forum_data/
 └── forum_db/
-    ├── Column: nodes             # {forum_hash}:{node_hash} → DagNode
-    ├── Column: forums            # {forum_hash} → ForumMetadata
-    ├── Column: heads             # {forum_hash} → Vec<ContentHash>
-    ├── Column: meta              # forum_list → [forum_hashes]
-    ├── Column: private           # Private data (conversation sessions, etc.)
-    ├── Column: idx_forums        # Sorted index for forum listing
-    ├── Column: idx_boards        # Sorted index for board listing
-    ├── Column: idx_threads       # Sorted index for thread listing
-    ├── Column: idx_posts         # Sorted index for post listing
-    ├── Column: idx_post_counts   # Reply count cache per thread
-    ├── Column: idx_mod_actions   # Index for moderation actions
-    ├── Column: idx_edits         # Index for edit nodes
+    ├── Column: nodes              # {forum_hash}:{node_hash} → DagNode
+    ├── Column: forums             # {forum_hash} → ForumMetadata
+    ├── Column: heads              # {forum_hash} → Vec<ContentHash>
+    ├── Column: meta               # forum_list → [forum_hashes], forum_count → u64
+    ├── Column: private            # Private data (conversation sessions, etc.)
+    │
+    │  # Primary indexes (sorted for pagination)
+    ├── Column: idx_forums         # Sorted index for forum listing
+    ├── Column: idx_boards         # Sorted index for board listing
+    ├── Column: idx_threads        # Sorted index for thread listing
+    ├── Column: idx_posts          # Sorted index for post listing
+    ├── Column: idx_mod_actions    # Index for moderation actions
+    ├── Column: idx_edits          # Index for edit nodes
     ├── Column: idx_encryption_ids # Index for PM encryption identities
-    └── Column: idx_sealed_msgs   # Index for sealed private messages
+    ├── Column: idx_sealed_msgs    # Index for sealed private messages
+    │
+    │  # Count caches (O(1) total counts)
+    ├── Column: idx_post_counts    # Reply count cache per thread
+    ├── Column: idx_board_counts   # Board count per forum
+    ├── Column: idx_thread_counts  # Thread count per board
+    │
+    │  # Mod-derived state indexes (avoid replaying all mod actions)
+    ├── Column: idx_moved_threads  # Thread → current board (after MoveThread)
+    ├── Column: idx_hidden_threads # Hidden thread hashes
+    ├── Column: idx_hidden_posts   # Hidden post hashes
+    ├── Column: idx_hidden_boards  # Hidden board hashes
+    ├── Column: idx_forum_mods     # Forum moderators (fingerprint → role)
+    └── Column: idx_board_mods     # Board moderators
 ```
 
 ### Query Indexes
@@ -221,17 +235,25 @@ The client storage maintains indexes for fast queries. Without indexes, every qu
 
 Indexes embed timestamps directly in keys to enable sorted iteration without post-processing. This allows cursor-based pagination with early termination.
 
-| Index                | Key Structure                                                | Size      | Sort Order    |
-| -------------------- | ------------------------------------------------------------ | --------- | ------------- |
-| `idx_forums`         | `inverted_timestamp + forum_hash`                            | 72 bytes  | Newest first  |
-| `idx_boards`         | `forum_hash + inverted_timestamp + board_hash`               | 136 bytes | Newest first  |
-| `idx_threads`        | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes | Newest first  |
-| `idx_posts`          | `forum_hash + thread_hash + timestamp + post_hash`           | 200 bytes | Oldest first  |
-| `idx_post_counts`    | `forum_hash + thread_hash`                                   | 128 bytes | N/A (counter) |
-| `idx_mod_actions`    | `forum_hash + mod_action_hash`                               | 128 bytes | N/A           |
-| `idx_edits`          | `forum_hash + target_hash + edit_hash`                       | 192 bytes | N/A           |
-| `idx_encryption_ids` | `forum_hash + identity_hash`                                 | 128 bytes | N/A           |
-| `idx_sealed_msgs`    | `forum_hash + timestamp + msg_hash`                          | 136 bytes | Oldest first  |
+| Index                | Key Structure                                                | Size       | Sort Order    |
+| -------------------- | ------------------------------------------------------------ | ---------- | ------------- |
+| `idx_forums`         | `inverted_timestamp + forum_hash`                            | 72 bytes   | Newest first  |
+| `idx_boards`         | `forum_hash + inverted_timestamp + board_hash`               | 136 bytes  | Newest first  |
+| `idx_threads`        | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes  | Newest first  |
+| `idx_posts`          | `forum_hash + thread_hash + timestamp + post_hash`           | 200 bytes  | Oldest first  |
+| `idx_post_counts`    | `forum_hash + thread_hash`                                   | 128 bytes  | N/A (counter) |
+| `idx_board_counts`   | `forum_hash`                                                 | 64 bytes   | N/A (counter) |
+| `idx_thread_counts`  | `forum_hash + board_hash`                                    | 128 bytes  | N/A (counter) |
+| `idx_mod_actions`    | `forum_hash + mod_action_hash`                               | 128 bytes  | N/A           |
+| `idx_edits`          | `forum_hash + target_hash + edit_hash`                       | 192 bytes  | N/A           |
+| `idx_encryption_ids` | `forum_hash + identity_hash`                                 | 128 bytes  | N/A           |
+| `idx_sealed_msgs`    | `forum_hash + timestamp + msg_hash`                          | 136 bytes  | Oldest first  |
+| `idx_moved_threads`  | `forum_hash + thread_hash`                                   | 128 bytes  | N/A           |
+| `idx_hidden_threads` | `forum_hash + thread_hash`                                   | 128 bytes  | N/A           |
+| `idx_hidden_posts`   | `forum_hash + post_hash`                                     | 128 bytes  | N/A           |
+| `idx_hidden_boards`  | `forum_hash + board_hash`                                    | 128 bytes  | N/A           |
+| `idx_forum_mods`     | `forum_hash + fingerprint`                                   | 64+ bytes  | N/A           |
+| `idx_board_mods`     | `forum_hash + board_hash + fingerprint`                      | 128+ bytes | N/A           |
 
 **Timestamp Encoding:**
 
@@ -259,15 +281,24 @@ The pagination algorithm:
 
 **Performance:**
 
-| Query               | Without Indexes | With Indexes                 |
-| ------------------- | --------------- | ---------------------------- |
-| List boards         | O(all nodes)    | O(page_size)                 |
-| List threads        | O(all nodes)    | O(page_size)                 |
-| List posts          | O(all nodes)    | O(page_size)                 |
-| Get post count      | O(all nodes)    | O(1)                         |
-| Paginate 10 of 1000 | O(1000)         | O(10) with early termination |
+| Query                | Without Indexes    | With Indexes                 |
+| -------------------- | ------------------ | ---------------------------- |
+| List boards          | O(all nodes)       | O(page_size)                 |
+| List threads         | O(all nodes)       | O(page_size)                 |
+| List posts           | O(all nodes)       | O(page_size)                 |
+| Get post count       | O(all nodes)       | O(1)                         |
+| Get board count      | O(all boards)      | O(1)                         |
+| Get thread count     | O(all threads)     | O(1)                         |
+| Get forum count      | O(all forums)      | O(1)                         |
+| Get hidden threads   | O(all mod actions) | O(hidden threads)            |
+| Get hidden posts     | O(all mod actions) | O(hidden posts)              |
+| Get forum moderators | O(all mod actions) | O(moderators)                |
+| Get board moderators | O(all mod actions) | O(board moderators)          |
+| Get moved threads    | O(all mod actions) | O(moved threads)             |
+| Paginate 10 of 1000  | O(1000)            | O(10) with early termination |
 
 For forums with 1000+ nodes, this reduces page load times from 300-400ms to 2-10ms.
+For forums with 1000+ mod actions, moderator/hidden queries are now O(result size) instead of O(mod actions).
 
 **Summary Types (N+1 Query Elimination):**
 
@@ -275,6 +306,7 @@ Paginated queries return summary structs that include related data, eliminating 
 
 | Query                    | Return Type           | Included Data                                     |
 | ------------------------ | --------------------- | ------------------------------------------------- |
+| `list_forums_paginated`  | `ForumSummary`        | Forum + effective name/description + board count  |
 | `get_boards_paginated`   | `BoardSummary`        | Board + effective name/description + thread count |
 | `get_threads_paginated`  | `ThreadSummary`       | Thread + post count                               |
 | `get_posts_paginated`    | `PostSummary`         | Post + quote preview (if quoting)                 |
@@ -282,7 +314,8 @@ Paginated queries return summary structs that include related data, eliminating 
 
 This eliminates per-item queries:
 
-- **Boards**: Edits batch-loaded in single pass; thread counts from index prefix scans
+- **Forums**: Edits loaded per-forum; board counts from `idx_board_counts` (O(1) per forum)
+- **Boards**: Edits loaded per-board (targeted prefix scan); thread counts from `idx_thread_counts` (O(1) per board)
 - **Threads**: Post counts are fetched from `idx_post_counts` (O(1) per thread)
 - **Posts**: Only quoted posts are loaded (not all posts in thread)
 - **Conversations**: Messages are counted and last message fetched in a single pass

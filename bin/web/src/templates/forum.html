@@ -23,6 +23,7 @@
             <tr>
                 <th>Forum Name</th>
                 <th>Description</th>
+                <th>Boards</th>
                 <th>Created</th>
                 <th>Actions</th>
             </tr>
@@ -32,6 +33,7 @@
             <tr>
                 <td><strong>{{ forum.name }}</strong></td>
                 <td>{{ forum.description }}</td>
+                <td>{{ forum.board_count }}</td>
                 <td>{{ forum.created_at_display }}</td>
                 <td>
                     <a href="/forum/{{ forum.hash }}" class="btn btn-small">View Boards</a>
