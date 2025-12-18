@@ -117,10 +117,13 @@ fn build_board_display_info_from_summary(summary: &pqpgp::forum::BoardSummary) -
         description: summary.effective_description.clone(),
         tags: summary.board.tags().to_vec(),
         created_at_display: format_timestamp(summary.board.created_at()),
+        thread_count: summary.thread_count,
     }
 }
 
 /// Builds a BoardDisplayInfo with edits applied (for single board lookups).
+/// Note: thread_count is set to 0 since this is used for single board lookups
+/// where we don't need to display thread counts (e.g., move thread dropdown).
 fn build_board_display_info(
     persistence: &SharedForumPersistence,
     forum_hash: &ContentHash,
@@ -137,6 +140,7 @@ fn build_board_display_info(
         description,
         tags: board.tags().to_vec(),
         created_at_display: format_timestamp(board.created_at()),
+        thread_count: 0, // Not needed for single board lookups
     }
 }
 

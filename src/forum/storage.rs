@@ -169,6 +169,8 @@ pub struct BoardSummary {
     pub effective_name: String,
     /// Effective description after edits (or original if no edits).
     pub effective_description: String,
+    /// Number of threads in this board.
+    pub thread_count: usize,
 }
 
 /// Summary of a post with resolved quote content (for efficient listing).
@@ -1368,7 +1370,22 @@ impl ForumStorage {
             edits.sort_by_key(|(ts, _)| *ts);
         }
 
-        // Build BoardSummary with effective name/description
+        // Count threads for each board
+        // Thread index key: forum_hash (64) + board_hash (64) + inverted_timestamp (8) + thread_hash (64) = 200 bytes
+        let mut thread_counts: HashMap<ContentHash, usize> = HashMap::new();
+        for board in &boards {
+            let prefix = Self::thread_index_prefix(forum_hash, board.hash());
+            let mut count = 0;
+            self.db.prefix_iterate(CF_IDX_THREADS, &prefix, |key, _| {
+                if key.len() == 200 {
+                    count += 1;
+                }
+                true
+            })?;
+            thread_counts.insert(*board.hash(), count);
+        }
+
+        // Build BoardSummary with effective name/description and thread count
         let summaries: Vec<BoardSummary> = boards
             .into_iter()
             .map(|board| {
@@ -1387,10 +1404,13 @@ impl ForumStorage {
                     }
                 }
 
+                let thread_count = thread_counts.get(board.hash()).copied().unwrap_or(0);
+
                 BoardSummary {
                     board,
                     effective_name: name,
                     effective_description: description,
+                    thread_count,
                 }
             })
             .collect();

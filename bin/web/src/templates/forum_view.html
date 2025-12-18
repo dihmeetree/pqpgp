@@ -51,6 +51,7 @@
             <tr>
                 <th>Board Name</th>
                 <th>Description</th>
+                <th>Threads</th>
                 <th>Tags</th>
                 <th>Created</th>
                 <th>Actions</th>
@@ -61,6 +62,7 @@
             <tr>
                 <td><strong>{{ board.name }}</strong></td>
                 <td>{{ board.description }}</td>
+                <td>{{ board.thread_count }}</td>
                 <td>
                     {% for tag in board.tags %}
                     <span class="status-badge status-success">{{ tag }}</span>

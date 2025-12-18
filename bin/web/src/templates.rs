@@ -188,6 +188,7 @@ pub struct BoardDisplayInfo {
     pub description: String,
     pub tags: Vec<String>,
     pub created_at_display: String,
+    pub thread_count: usize,
 }
 
 /// Thread info for display
