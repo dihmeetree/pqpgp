@@ -8,7 +8,7 @@ use pqpgp::{
     crypto::{decrypt_message, encrypt_message, sign_message, KeyPair, TimingAnalyzer, TimingSafe},
     PqpgpError,
 };
-use rand::{rngs::OsRng, Rng};
+use rand::Rng;
 use std::time::Instant;
 
 // Dynamic sample size based on build profile
@@ -55,7 +55,7 @@ fn get_failure_ratio_threshold() -> f64 {
 #[test]
 #[ignore]
 fn test_enhanced_decryption_timing_consistency() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let keypair1 = KeyPair::generate_mlkem1024().unwrap();
     let keypair2 = KeyPair::generate_mlkem1024().unwrap();
     let message = b"timing safety test message";
@@ -105,17 +105,17 @@ fn test_enhanced_decryption_timing_consistency() {
         let mut corrupted = encrypted.clone();
 
         // Randomly corrupt different parts that affect AEAD authentication
-        let corruption_type = rng.gen_range(0..2); // Only corrupt cryptographically significant parts
+        let corruption_type = rng.random_range(0..2); // Only corrupt cryptographically significant parts
         match corruption_type {
             0 => {
                 if !corrupted.encapsulated_key.is_empty() {
-                    let idx = rng.gen_range(0..corrupted.encapsulated_key.len());
+                    let idx = rng.random_range(0..corrupted.encapsulated_key.len());
                     corrupted.encapsulated_key[idx] ^= 0xFF;
                 }
             }
             _ => {
                 if !corrupted.encrypted_content.is_empty() {
-                    let idx = rng.gen_range(0..corrupted.encrypted_content.len());
+                    let idx = rng.random_range(0..corrupted.encrypted_content.len());
                     corrupted.encrypted_content[idx] ^= 0xFF;
                 }
             }
@@ -193,7 +193,7 @@ fn test_enhanced_decryption_timing_consistency() {
 fn test_constant_time_comparison_statistical_analysis() {
     let mut equal_analyzer = TimingAnalyzer::new();
     let mut unequal_analyzer = TimingAnalyzer::new();
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test data with various patterns
     let test_cases = [
@@ -205,7 +205,7 @@ fn test_constant_time_comparison_statistical_analysis() {
 
     // Equal comparisons
     for _ in 0..STATISTICAL_SAMPLES / 2 {
-        let case = &test_cases[rng.gen_range(0..2)]; // Only equal cases
+        let case = &test_cases[rng.random_range(0..2)]; // Only equal cases
         let start = Instant::now();
         let result = TimingSafe::bytes_equal(&case.0, &case.1);
         let duration = start.elapsed().as_nanos();
@@ -216,7 +216,7 @@ fn test_constant_time_comparison_statistical_analysis() {
 
     // Unequal comparisons
     for _ in 0..STATISTICAL_SAMPLES / 2 {
-        let case = &test_cases[rng.gen_range(2..4)]; // Only unequal cases
+        let case = &test_cases[rng.random_range(2..4)]; // Only unequal cases
         let start = Instant::now();
         let result = TimingSafe::bytes_equal(&case.0, &case.1);
         let duration = start.elapsed().as_nanos();
@@ -272,7 +272,7 @@ fn test_constant_time_comparison_statistical_analysis() {
 /// Test timing consistency across different key sizes and operations
 #[test]
 fn test_operation_timing_independence() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let mut timing_analyzer = TimingAnalyzer::new();
 
     // Test various operations that should have consistent timing patterns
@@ -284,7 +284,7 @@ fn test_operation_timing_independence() {
     ];
 
     for _ in 0..STATISTICAL_SAMPLES {
-        let (_op_name, op_type) = &operations[rng.gen_range(0..operations.len())];
+        let (_op_name, op_type) = &operations[rng.random_range(0..operations.len())];
 
         let start = Instant::now();
         match *op_type {
@@ -302,8 +302,8 @@ fn test_operation_timing_independence() {
             }
             2 => {
                 // Key ID comparison
-                let id1 = rng.gen::<u64>();
-                let id2 = rng.gen::<u64>();
+                let id1 = rng.random::<u64>();
+                let id2 = rng.random::<u64>();
                 let _ = pqpgp::crypto::key_ids_equal(id1, id2);
             }
             _ => {

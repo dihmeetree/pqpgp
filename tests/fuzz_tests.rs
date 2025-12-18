@@ -8,17 +8,17 @@ use pqpgp::{
     packet::{Packet, PacketHeader, PacketType, PublicKeyPacket, UserIdPacket},
     validation::Validator,
 };
-use rand::{rngs::OsRng, Rng};
+use rand::Rng;
 
 /// Property-based test for packet parsing robustness
 #[test]
 fn fuzz_packet_parsing() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test with 1000 random byte sequences
     for _ in 0..1000 {
         // Generate random data of varying sizes
-        let size = rng.gen_range(0..10000);
+        let size = rng.random_range(0..10000);
         let mut random_data = vec![0u8; size];
         rng.fill(&mut random_data[..]);
 
@@ -36,7 +36,7 @@ fn fuzz_packet_parsing() {
 /// Test encryption/decryption with malformed keys
 #[test]
 fn fuzz_key_operations() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test with various key sizes and malformed key data
     for key_size in [0, 1, 32, 64, 128, 256, 512, 1024, 2048, 4096] {
@@ -56,7 +56,7 @@ fn fuzz_key_operations() {
 /// Test User ID parsing with various edge cases
 #[test]
 fn fuzz_user_id_parsing() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test edge cases for User ID parsing
     let test_cases = vec![
@@ -76,7 +76,7 @@ fn fuzz_user_id_parsing() {
 
     // Additional random fuzzing
     for _ in 0..500 {
-        let size = rng.gen_range(0..2000);
+        let size = rng.random_range(0..2000);
         let mut random_data = vec![0u8; size];
         rng.fill(&mut random_data[..]);
 
@@ -115,12 +115,12 @@ fn fuzz_message_sizes() {
 /// Test with malformed packet headers
 #[test]
 fn fuzz_packet_headers() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test various packet header formats
     for _ in 0..1000 {
         // Generate random header-like data
-        let header_size = rng.gen_range(1..50);
+        let header_size = rng.random_range(1..50);
         let mut header_data = vec![0u8; header_size];
         rng.fill(&mut header_data[..]);
 
@@ -140,12 +140,12 @@ fn fuzz_packet_headers() {
 /// Test validation functions with extreme inputs
 #[test]
 fn fuzz_validation_functions() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test length field validation with random values
     for _ in 0..500 {
-        let length = rng.gen::<usize>();
-        let max_length = rng.gen_range(1..usize::MAX / 2);
+        let length = rng.random_range(0..usize::MAX);
+        let max_length = rng.random_range(1..usize::MAX / 2);
 
         let result = std::panic::catch_unwind(|| {
             let _ = Validator::validate_length_field(length, max_length);
@@ -156,7 +156,7 @@ fn fuzz_validation_functions() {
 
     // Test packet count validation
     for _ in 0..500 {
-        let count = rng.gen::<usize>();
+        let count = rng.random_range(0..usize::MAX);
 
         let result = std::panic::catch_unwind(|| {
             let _ = Validator::validate_packet_count(count);
@@ -167,7 +167,7 @@ fn fuzz_validation_functions() {
 
     // Test keyring size validation
     for _ in 0..500 {
-        let size = rng.gen::<usize>();
+        let size = rng.random_range(0..usize::MAX);
 
         let result = std::panic::catch_unwind(|| {
             let _ = Validator::validate_keyring_size(size);
@@ -180,14 +180,14 @@ fn fuzz_validation_functions() {
 /// Test byte parsing functions with malformed input
 #[test]
 fn fuzz_byte_parsing() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..1000 {
-        let data_size = rng.gen_range(0..100);
+        let data_size = rng.random_range(0..100);
         let mut data = vec![0u8; data_size];
         rng.fill(&mut data[..]);
 
-        let offset = rng.gen_range(0..data.len().saturating_add(10));
+        let offset = rng.random_range(0..data.len().saturating_add(10));
 
         // Test u32 parsing
         let result = std::panic::catch_unwind(|| {
@@ -202,7 +202,7 @@ fn fuzz_byte_parsing() {
         assert!(result.is_ok(), "u16 parsing panicked");
 
         // Test slice extraction
-        let length = rng.gen_range(0..50);
+        let length = rng.random_range(0..50);
         let result = std::panic::catch_unwind(|| {
             let _ = Validator::validate_slice_extraction(&data, offset, length);
         });
@@ -213,14 +213,14 @@ fn fuzz_byte_parsing() {
 /// Test nonce validation with various sizes
 #[test]
 fn fuzz_nonce_validation() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..500 {
-        let nonce_size = rng.gen_range(0..100);
+        let nonce_size = rng.random_range(0..100);
         let mut nonce = vec![0u8; nonce_size];
         rng.fill(&mut nonce[..]);
 
-        let expected_size = rng.gen_range(1..50);
+        let expected_size = rng.random_range(1..50);
 
         let result = std::panic::catch_unwind(|| {
             let _ = Validator::validate_nonce_size(&nonce, expected_size);
@@ -233,11 +233,11 @@ fn fuzz_nonce_validation() {
 /// Test algorithm ID validation with random IDs
 #[test]
 fn fuzz_algorithm_validation() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let valid_algorithms = [100, 101];
 
     for _ in 0..500 {
-        let algorithm_id = rng.gen::<u8>();
+        let algorithm_id = rng.random::<u8>();
 
         let result = std::panic::catch_unwind(|| {
             let _ = Validator::validate_algorithm_id(algorithm_id, &valid_algorithms);
@@ -322,11 +322,11 @@ fn fuzz_concurrent_operations() {
         .map(|_| {
             let keypair = keypair.clone();
             thread::spawn(move || {
-                let mut local_rng = OsRng;
+                let mut local_rng = rand::rng();
 
                 // Each thread performs random operations
                 for _ in 0..50 {
-                    let message_size = local_rng.gen_range(0..1000);
+                    let message_size = local_rng.random_range(0..1000);
                     let message = vec![42u8; message_size];
 
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

@@ -7,7 +7,7 @@ use pqpgp::crypto::{
     decrypt_message, encrypt_message, sign_message, verify_signature, KeyPair, TimingAnalyzer,
     TimingSafe, TimingSafeError,
 };
-use rand::{rngs::OsRng, Rng};
+use rand::Rng;
 use std::time::Instant;
 
 // Dynamic sample size based on build profile
@@ -89,7 +89,7 @@ fn test_encryption_timing_consistency() {
 /// Test timing consistency of decryption operations (success vs failure)
 #[test]
 fn test_decryption_timing_side_channel_analysis() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let keypair = KeyPair::generate_mlkem1024().unwrap();
     let message = b"sensitive timing test message";
 
@@ -114,25 +114,25 @@ fn test_decryption_timing_side_channel_analysis() {
         let mut corrupted = valid_encrypted.clone();
 
         // Systematically corrupt different parts that affect AEAD authentication
-        let corruption_type = rng.gen_range(0..3); // Exclude nonce corruption since it's now redundant
+        let corruption_type = rng.random_range(0..3); // Exclude nonce corruption since it's now redundant
         match corruption_type {
             0 => {
                 // Corrupt encapsulated key
                 if !corrupted.encapsulated_key.is_empty() {
-                    let idx = rng.gen_range(0..corrupted.encapsulated_key.len());
-                    corrupted.encapsulated_key[idx] ^= rng.gen::<u8>() | 1; // Ensure change
+                    let idx = rng.random_range(0..corrupted.encapsulated_key.len());
+                    corrupted.encapsulated_key[idx] ^= rng.random::<u8>() | 1; // Ensure change
                 }
             }
             1 => {
                 // Corrupt encrypted content
                 if !corrupted.encrypted_content.is_empty() {
-                    let idx = rng.gen_range(0..corrupted.encrypted_content.len());
-                    corrupted.encrypted_content[idx] ^= rng.gen::<u8>() | 1;
+                    let idx = rng.random_range(0..corrupted.encrypted_content.len());
+                    corrupted.encrypted_content[idx] ^= rng.random::<u8>() | 1;
                 }
             }
             _ => {
                 // Corrupt key ID to test key lookup timing
-                corrupted.recipient_key_id ^= rng.gen::<u64>() | 1;
+                corrupted.recipient_key_id ^= rng.random::<u64>() | 1;
             }
         }
 
@@ -208,7 +208,7 @@ fn test_decryption_timing_side_channel_analysis() {
 /// Test password verification timing consistency
 #[test]
 fn test_password_timing_analysis() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let keypair = KeyPair::generate_mldsa87().unwrap();
     let correct_password = "correct_password_123!";
     let message = b"password timing test message";
@@ -244,7 +244,7 @@ fn test_password_timing_analysis() {
     ];
 
     for _ in 0..SAMPLE_SIZE / 2 {
-        let wrong_password = &wrong_passwords[rng.gen_range(0..wrong_passwords.len())];
+        let wrong_password = &wrong_passwords[rng.random_range(0..wrong_passwords.len())];
         let password = pqpgp::crypto::Password::new(wrong_password.to_string());
 
         let start = Instant::now();
@@ -288,7 +288,7 @@ fn test_password_timing_analysis() {
 /// Test signature verification timing consistency
 #[test]
 fn test_signature_verification_timing_analysis() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let keypair = KeyPair::generate_mldsa87().unwrap();
     let wrong_keypair = KeyPair::generate_mldsa87().unwrap();
     let message = b"signature timing test message";
@@ -311,7 +311,7 @@ fn test_signature_verification_timing_analysis() {
 
     // Test invalid signature verification timing
     for _ in 0..SAMPLE_SIZE / 2 {
-        let verification_type = rng.gen_range(0..3);
+        let verification_type = rng.random_range(0..3);
         let start = Instant::now();
 
         let result = match verification_type {
@@ -328,8 +328,8 @@ fn test_signature_verification_timing_analysis() {
                 // Corrupted signature
                 let mut corrupted_sig = valid_signature.clone();
                 if !corrupted_sig.signature_bytes.is_empty() {
-                    let idx = rng.gen_range(0..corrupted_sig.signature_bytes.len());
-                    corrupted_sig.signature_bytes[idx] ^= rng.gen::<u8>() | 1;
+                    let idx = rng.random_range(0..corrupted_sig.signature_bytes.len());
+                    corrupted_sig.signature_bytes[idx] ^= rng.random::<u8>() | 1;
                 }
                 verify_signature(keypair.public_key(), message, &corrupted_sig)
             }
@@ -425,7 +425,7 @@ fn test_timing_safe_error_handling() {
     ];
 
     for _ in 0..SAMPLE_SIZE {
-        let error_type = &error_types[rand::random::<usize>() % error_types.len()];
+        let error_type = &error_types[rand::rng().random_range(0..error_types.len())];
 
         let start = Instant::now();
         let _result: Result<(), _> = TimingSafeError::delayed_error(match error_type {

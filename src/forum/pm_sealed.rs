@@ -130,7 +130,7 @@ pub fn seal_private_message(
     // Step 4: Encrypt inner message
     let inner_bytes = inner_message.to_bytes()?;
     let mut inner_nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut inner_nonce);
+    rand::rng().fill_bytes(&mut inner_nonce);
 
     let cipher = Aes256Gcm::new_from_slice(&conversation_key[..])
         .map_err(|_| PqpgpError::crypto("Failed to create AES-GCM cipher"))?;
@@ -164,7 +164,7 @@ pub fn seal_private_message(
 
     let outer_key = derive_outer_key(&outer_ss)?;
     let mut outer_nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut outer_nonce);
+    rand::rng().fill_bytes(&mut outer_nonce);
 
     let outer_cipher = Aes256Gcm::new_from_slice(&outer_key)
         .map_err(|_| PqpgpError::crypto("Failed to create outer AES-GCM cipher"))?;
@@ -184,7 +184,7 @@ pub fn seal_private_message(
     let recipient_hint_key =
         derive_hint_key_from_spk(recipient_identity.signed_prekey().public_key());
     let mut hint_nonce = [0u8; HINT_NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut hint_nonce);
+    rand::rng().fill_bytes(&mut hint_nonce);
     let recipient_hint = compute_recipient_hint(&recipient_hint_key, &hint_nonce);
 
     // Step 10: Create sealed message
@@ -225,7 +225,7 @@ pub fn seal_private_message_with_session(
     // Step 1: Encrypt inner message with existing conversation key
     let inner_bytes = inner_message.to_bytes()?;
     let mut inner_nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut inner_nonce);
+    rand::rng().fill_bytes(&mut inner_nonce);
 
     let cipher = Aes256Gcm::new_from_slice(conversation_key)
         .map_err(|_| PqpgpError::crypto("Failed to create AES-GCM cipher"))?;
@@ -251,7 +251,7 @@ pub fn seal_private_message_with_session(
 
     let outer_key = derive_outer_key(&outer_ss)?;
     let mut outer_nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut outer_nonce);
+    rand::rng().fill_bytes(&mut outer_nonce);
 
     let outer_cipher = Aes256Gcm::new_from_slice(&outer_key)
         .map_err(|_| PqpgpError::crypto("Failed to create outer AES-GCM cipher"))?;
@@ -271,7 +271,7 @@ pub fn seal_private_message_with_session(
     let recipient_hint_key =
         derive_hint_key_from_spk(recipient_identity.signed_prekey().public_key());
     let mut hint_nonce = [0u8; HINT_NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut hint_nonce);
+    rand::rng().fill_bytes(&mut hint_nonce);
     let recipient_hint = compute_recipient_hint(&recipient_hint_key, &hint_nonce);
 
     // Step 6: Create sealed message
@@ -604,7 +604,7 @@ pub fn seal_with_ratchet(
     // Step 3: Encrypt inner message with the ratchet-derived key
     let inner_bytes = inner_message.to_bytes()?;
     let mut inner_nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut inner_nonce);
+    rand::rng().fill_bytes(&mut inner_nonce);
 
     let aes_key = send_info.message_key.derive_aes_key()?;
     let cipher = Aes256Gcm::new_from_slice(&aes_key)
@@ -637,7 +637,7 @@ pub fn seal_with_ratchet(
 
     let outer_key = derive_outer_key(&outer_ss)?;
     let mut outer_nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut outer_nonce);
+    rand::rng().fill_bytes(&mut outer_nonce);
 
     let outer_cipher = Aes256Gcm::new_from_slice(&outer_key)
         .map_err(|_| PqpgpError::crypto("Failed to create outer AES-GCM cipher"))?;
@@ -659,7 +659,7 @@ pub fn seal_with_ratchet(
     let recipient_hint_key =
         derive_hint_key_from_spk(recipient_identity.signed_prekey().public_key());
     let mut hint_nonce = [0u8; HINT_NONCE_SIZE];
-    rand::thread_rng().fill_bytes(&mut hint_nonce);
+    rand::rng().fill_bytes(&mut hint_nonce);
     let recipient_hint = compute_recipient_hint(&recipient_hint_key, &hint_nonce);
 
     // Step 9: Create sealed message

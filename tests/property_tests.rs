@@ -8,17 +8,17 @@ use pqpgp::{
     packet::{PacketHeader, UserIdPacket},
     validation::Validator,
 };
-use rand::{rngs::OsRng, Rng};
+use rand::Rng;
 
 /// Property: All valid encryptions should decrypt to original message
 #[test]
 fn property_encryption_decryption_roundtrip() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let keypair = KeyPair::generate_mlkem1024().unwrap();
 
     // Test with various message sizes and contents
     for _ in 0..50 {
-        let message_size = rng.gen_range(1..1000);
+        let message_size = rng.random_range(1..1000);
         let mut message = vec![0u8; message_size];
         rng.fill(&mut message[..]);
 
@@ -43,10 +43,10 @@ fn property_encryption_decryption_roundtrip() {
 /// Property: Invalid inputs should always be rejected safely
 #[test]
 fn property_invalid_input_rejection() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..200 {
-        let data_size = rng.gen_range(0..2000);
+        let data_size = rng.random_range(0..2000);
         let mut random_data = vec![0u8; data_size];
         rng.fill(&mut random_data[..]);
 
@@ -66,11 +66,11 @@ fn property_invalid_input_rejection() {
 /// Property: Validation functions should be consistent and safe
 #[test]
 fn property_validation_consistency() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..100 {
-        let length = rng.gen::<usize>() % 1000000; // Reasonable upper bound
-        let max_length = rng.gen::<usize>() % 1000000;
+        let length = rng.random_range(0..usize::MAX) % 1000000; // Reasonable upper bound
+        let max_length = rng.random_range(0..usize::MAX) % 1000000;
 
         // Property: Validation should be deterministic
         let result1 = Validator::validate_length_field(length, max_length);
@@ -106,11 +106,11 @@ fn property_validation_consistency() {
 /// Property: Nonce validation should enforce exact size requirements
 #[test]
 fn property_nonce_size_enforcement() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..100 {
-        let nonce_size = rng.gen_range(0..100);
-        let expected_size = rng.gen_range(1..50);
+        let nonce_size = rng.random_range(0..100);
+        let expected_size = rng.random_range(1..50);
 
         let nonce = vec![0u8; nonce_size];
         let result = Validator::validate_nonce_size(&nonce, expected_size);
@@ -241,14 +241,14 @@ fn property_message_size_resource_protection() {
 /// Property: Slice extraction should prevent buffer overflows
 #[test]
 fn property_slice_extraction_bounds_safety() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..100 {
-        let data_size = rng.gen_range(0..1000);
+        let data_size = rng.random_range(0..1000);
         let data = vec![42u8; data_size];
 
-        let offset = rng.gen::<usize>() % (data_size + 100);
-        let length = rng.gen::<usize>() % 200;
+        let offset = rng.random_range(0..usize::MAX) % (data_size + 100);
+        let length = rng.random_range(0..usize::MAX) % 200;
 
         let result = Validator::validate_slice_extraction(&data, offset, length);
 
@@ -278,14 +278,14 @@ fn property_slice_extraction_bounds_safety() {
 /// Property: Integer parsing should handle all edge cases safely
 #[test]
 fn property_integer_parsing_safety() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..100 {
-        let data_size = rng.gen_range(0..20);
+        let data_size = rng.random_range(0..20);
         let mut data = vec![0u8; data_size];
         rng.fill(&mut data[..]);
 
-        let offset = rng.gen::<usize>() % (data_size + 10);
+        let offset = rng.random_range(0..usize::MAX) % (data_size + 10);
 
         // Property: u32 parsing should succeed iff 4 bytes available at offset
         let u32_result = Validator::validate_u32_from_bytes(&data, offset);
@@ -371,10 +371,10 @@ fn property_keyring_size_scaling() {
 /// Property: Multiple validations should be composable and consistent
 #[test]
 fn property_validation_composition() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     for _ in 0..50 {
-        let data_size = rng.gen_range(0..500);
+        let data_size = rng.random_range(0..500);
         let data = vec![42u8; data_size];
 
         // Test that validating message size and then other validations is consistent
@@ -394,14 +394,14 @@ fn property_validation_composition() {
 /// Property: Error messages should not leak sensitive information
 #[test]
 fn property_error_message_safety() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test that error messages don't contain actual data
     for _ in 0..50 {
         let secret_data = b"SECRET_PASSWORD_12345";
         let mut test_data = Vec::new();
         test_data.extend_from_slice(secret_data);
-        test_data.extend_from_slice(&vec![0u8; rng.gen_range(0..100)]);
+        test_data.extend_from_slice(&vec![0u8; rng.random_range(0..100)]);
 
         // Try various parsing operations that should fail
         let results = vec![UserIdPacket::from_bytes(&test_data)];
