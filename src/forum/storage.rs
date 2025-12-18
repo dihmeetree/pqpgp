@@ -370,20 +370,17 @@ impl ForumStorage {
         // 1. Forum index is missing
         // 2. No board indexes at all (but forum has boards)
         // 3. Old format indexes exist (need to migrate to new sorted format)
-        // 4. Mod action indexes are missing
-        // 5. Encryption identity index is missing
-        // 6. Count caches are missing (new)
-        // 7. Forum mods index is missing (new)
+        // 4. Count caches are missing
+        // 5. Forum mods index is missing (every forum has an owner, so this is a reliable indicator)
+        //
+        // Note: mod_action_indexes and encryption_id_index may legitimately be empty
+        // if the forum has no mod actions or encryption identities. We use has_forum_mods_index
+        // as the reliable indicator since every forum has an owner entry.
         let needs_rebuild = if !has_forum_index {
             info!("Forum index missing, will rebuild");
             true
-        } else if has_new_format_indexes
-            && has_mod_action_indexes
-            && has_encryption_id_index
-            && has_board_count
-            && has_forum_mods_index
-        {
-            false // Already have all indexes
+        } else if has_new_format_indexes && has_board_count && has_forum_mods_index {
+            false // Already have all indexes (mod_actions and enc_ids may be empty)
         } else if has_old_format_indexes {
             info!("Old index format detected, rebuilding for sorted pagination...");
             true
@@ -401,12 +398,6 @@ impl ForumStorage {
                 board_count
             );
             board_count > 0
-        } else if !has_mod_action_indexes {
-            info!("Mod action index missing, will rebuild");
-            true
-        } else if !has_encryption_id_index {
-            info!("Encryption identity index missing, will rebuild");
-            true
         } else if !has_board_count {
             info!("Board count cache missing, will rebuild");
             true
