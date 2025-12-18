@@ -15,6 +15,7 @@
 //! - Optional attachments
 
 use crate::error::{PqpgpError, Result};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -100,7 +101,7 @@ impl MessageId {
     /// Generates a new random message ID.
     pub fn generate() -> Result<Self> {
         let mut id = [0u8; 16];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
+        rand::rng().fill_bytes(&mut id);
         Ok(Self(id))
     }
 

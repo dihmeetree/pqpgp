@@ -370,7 +370,7 @@ impl InnerMessage {
         let mut message_id = [0u8; 16];
         // Generate a random message ID
         use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut message_id);
+        rand::rng().fill_bytes(&mut message_id);
 
         Self {
             message_id,

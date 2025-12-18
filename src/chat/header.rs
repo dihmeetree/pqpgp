@@ -27,6 +27,7 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use hkdf::Hkdf;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::Sha3_512;
 use std::fmt;
@@ -83,7 +84,7 @@ impl HeaderKey {
 
         // Use a random nonce for header encryption
         let mut nonce_bytes = [0u8; 12];
-        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
 
         let key = Key::<Aes256Gcm>::from_slice(&self.key);
         let cipher = Aes256Gcm::new(key);

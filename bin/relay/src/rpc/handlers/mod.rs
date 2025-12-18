@@ -36,8 +36,7 @@ pub fn to_json<T: Serialize>(value: T) -> Result<Value, RpcError> {
 /// Generates a random hex ID.
 pub fn rand_id() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random_bytes: [u8; 16] = rng.gen();
+    let random_bytes: [u8; 16] = rand::rng().random();
     hex::encode(random_bytes)
 }
 

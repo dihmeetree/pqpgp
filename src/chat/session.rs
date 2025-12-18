@@ -25,6 +25,7 @@ use crate::chat::prekey::{PreKeyBundle, PreKeyGenerator};
 use crate::chat::ratchet::{DoubleRatchet, MessageKey, RatchetKeyPair, RatchetPublicKey};
 use crate::chat::x3dh::{X3DHKeys, X3DHReceiver, X3DHSender};
 use crate::error::{PqpgpError, Result};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -528,13 +529,11 @@ fn encrypt_with_message_key(
         aead::{Aead, KeyInit, Payload},
         Aes256Gcm, Key, Nonce,
     };
-    use rand::RngCore;
-
     let aes_key_bytes = message_key.derive_aes_key()?;
 
     // Generate a random nonce for each encryption
     let mut nonce_bytes = [0u8; NONCE_SIZE];
-    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+    rand::rng().fill_bytes(&mut nonce_bytes);
 
     let key = Key::<Aes256Gcm>::from_slice(&aes_key_bytes);
     let cipher = Aes256Gcm::new(key);

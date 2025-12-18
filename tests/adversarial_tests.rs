@@ -8,7 +8,7 @@ use pqpgp::{
     packet::{Packet, PacketHeader, PacketType, UserIdPacket},
     validation::{RateLimit, RateLimiter, Validator},
 };
-use rand::{rngs::OsRng, Rng};
+use rand::Rng;
 use std::time::{Duration, Instant};
 
 /// Test timing attack resistance in key operations
@@ -61,7 +61,7 @@ fn test_timing_attack_resistance() {
 /// Test side-channel resistance in decryption operations
 #[test]
 fn test_decryption_timing_consistency() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
     let keypair = KeyPair::generate_mlkem1024().unwrap();
     let message = b"test message for decryption timing";
 
@@ -83,17 +83,17 @@ fn test_decryption_timing_consistency() {
     for _ in 0..50 {
         let mut corrupted = encrypted.clone();
         // Corrupt a random part of the encrypted message
-        let corruption_target = rng.gen_range(0..2); // Only corrupt cryptographically significant parts
+        let corruption_target = rng.random_range(0..2); // Only corrupt cryptographically significant parts
         match corruption_target {
             0 => {
                 if !corrupted.encapsulated_key.is_empty() {
-                    let idx = rng.gen_range(0..corrupted.encapsulated_key.len());
+                    let idx = rng.random_range(0..corrupted.encapsulated_key.len());
                     corrupted.encapsulated_key[idx] ^= 1;
                 }
             }
             _ => {
                 if !corrupted.encrypted_content.is_empty() {
-                    let idx = rng.gen_range(0..corrupted.encrypted_content.len());
+                    let idx = rng.random_range(0..corrupted.encrypted_content.len());
                     corrupted.encrypted_content[idx] ^= 1;
                 }
             }
@@ -477,13 +477,13 @@ fn test_concurrent_attack_resistance() {
 /// Test memory safety under adversarial conditions
 #[test]
 fn test_memory_safety_attacks() {
-    let mut rng = OsRng;
+    let mut rng = rand::rng();
 
     // Test use-after-free scenarios by dropping and reusing data
     let mut data_blocks = Vec::new();
 
     for _ in 0..100 {
-        let size = rng.gen_range(1..1000);
+        let size = rng.random_range(1..1000);
         let mut data = vec![0u8; size];
         rng.fill(&mut data[..]);
 

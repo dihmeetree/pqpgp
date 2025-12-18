@@ -8,7 +8,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
 };
-use rand::{rngs::OsRng, RngCore};
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -75,7 +75,7 @@ impl EncryptedPrivateKey {
 
         // Generate random salt
         let mut salt = [0u8; SALT_SIZE];
-        OsRng.fill_bytes(&mut salt);
+        rand::rng().fill_bytes(&mut salt);
 
         // Derive key using Argon2id
         let derived_key = derive_key_from_password(password, &salt)?;
