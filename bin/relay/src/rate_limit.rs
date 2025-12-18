@@ -166,8 +166,8 @@ impl RateLimitLayer {
     /// Creates a rate limit layer optimized for write operations (more restrictive).
     pub fn for_writes() -> Self {
         Self::with_config(RateLimitConfig {
-            // 20 writes per 10 seconds (2 write/sec average)
-            requests_per_window: 20,
+            // 50 writes per 10 seconds (5 write/sec average)
+            requests_per_window: 50,
             window_duration: Duration::from_secs(10),
             cleanup_interval: Duration::from_secs(300),
         })

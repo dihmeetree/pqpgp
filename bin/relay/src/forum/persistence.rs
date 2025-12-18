@@ -369,6 +369,14 @@ impl PersistentForumState {
         Ok(Self { state, persistence })
     }
 
+    /// Creates a new persistent forum state with a custom data directory.
+    pub fn with_data_dir(data_dir: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let persistence = ForumPersistence::with_data_dir(data_dir)?;
+        let state = persistence.load_all()?;
+
+        Ok(Self { state, persistence })
+    }
+
     /// Creates a new forum and persists it.
     ///
     /// Database is the source of truth - we write to DB first, then update cache.

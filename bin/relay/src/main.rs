@@ -46,30 +46,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     // Parse command line args
-    let bind_addr = std::env::args()
-        .nth(1)
-        .filter(|arg| arg == "--bind")
-        .and_then(|_| std::env::args().nth(2))
-        .unwrap_or_else(|| "127.0.0.1:3001".to_string());
+    let args: Vec<String> = std::env::args().collect();
+    let mut bind_addr = "127.0.0.1:3001".to_string();
+    let mut data_dir: Option<String> = None;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--bind" => {
+                if i + 1 < args.len() {
+                    bind_addr = args[i + 1].clone();
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "--data-dir" => {
+                if i + 1 < args.len() {
+                    data_dir = Some(args[i + 1].clone());
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
 
     // Initialize relay state
     let relay_state: SharedRelayState = Arc::new(RwLock::new(RelayState::new()));
 
     // Load forum state from disk
-    let forum_state: SharedForumState = match PersistentForumState::new() {
-        Ok(persistent) => {
-            info!(
-                "Forum persistence initialized with {} forums, {} nodes",
-                persistent.forums().len(),
-                persistent.total_nodes()
-            );
-            Arc::new(RwLock::new(persistent))
-        }
-        Err(e) => {
-            error!("Failed to initialize forum persistence: {}", e);
-            error!("Starting with empty forum state");
-            Arc::new(RwLock::new(PersistentForumState::default()))
-        }
+    let forum_state: SharedForumState = match data_dir {
+        Some(dir) => match PersistentForumState::with_data_dir(&dir) {
+            Ok(persistent) => {
+                info!(
+                    "Forum persistence initialized from {} with {} forums, {} nodes",
+                    dir,
+                    persistent.forums().len(),
+                    persistent.total_nodes()
+                );
+                Arc::new(RwLock::new(persistent))
+            }
+            Err(e) => {
+                error!("Failed to initialize forum persistence: {}", e);
+                panic!("Failed to initialize persistent forum state: {:?}", e);
+            }
+        },
+        None => match PersistentForumState::new() {
+            Ok(persistent) => {
+                info!(
+                    "Forum persistence initialized with {} forums, {} nodes",
+                    persistent.forums().len(),
+                    persistent.total_nodes()
+                );
+                Arc::new(RwLock::new(persistent))
+            }
+            Err(e) => {
+                error!("Failed to initialize forum persistence: {}", e);
+                error!("Starting with empty forum state");
+                Arc::new(RwLock::new(PersistentForumState::default()))
+            }
+        },
     };
 
     // Combined app state

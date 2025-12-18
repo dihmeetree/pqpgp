@@ -15,6 +15,7 @@ A post-quantum secure implementation of PGP (Pretty Good Privacy) in Rust, provi
 - **[Forums](docs/forums.md)** - DAG structure, moderation, sync protocol
 - **[Private Messages](docs/private-messages.md)** - Sealed sender, X3DH, Double Ratchet
 - **[Relay Server](docs/relay.md)** - Message routing, forum hosting, peer sync
+- **[Simulator](docs/simulator.md)** - Multi-user testing environment, security attack simulation
 
 ## Security Features
 
@@ -597,6 +598,34 @@ pqpgp_relay_data/
 - **Compressed**: LZ4 compression reduces storage by ~60%
 - **Scalable**: Handles millions of nodes with O(1) writes
 - **Crash-safe**: WAL ensures durability even on power failure
+
+### Simulator (bin/simulator)
+
+```
+bin/simulator/
+├── Cargo.toml           # Simulator dependencies
+└── src/
+    ├── main.rs          # Entry point, spawns users and attack loop
+    ├── user.rs          # SimulatedUser with keypair
+    ├── relay.rs         # SimulatorRelay wrapper for RPC
+    ├── simulation.rs    # Forum operations (create boards, threads, posts)
+    └── malicious.rs     # 13 attack scenarios (signature forge, replay, etc.)
+```
+
+**Features:**
+
+- Two relay instances (Alice on 4001, Bob on 4002) with peer sync
+- Legitimate activity simulation (Alice creates content, Bob participates)
+- Malicious user (Eve) continuously tests security controls
+- Panics on successful attack to flag vulnerabilities
+
+```bash
+# Run the simulator
+cargo run --release -p pqpgp-simulator
+
+# Connect external clients to test sync
+PQPGP_RELAY_URL=http://127.0.0.1:4001 pqpgp-web
+```
 
 ### Testing & Examples
 
