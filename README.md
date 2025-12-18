@@ -546,17 +546,17 @@ pqpgp_forum_data/
 
 Indexes embed timestamps in keys for efficient sorted iteration and cursor-based pagination:
 
-| Index               | Key Structure                                      | Sort Order   |
-| ------------------- | -------------------------------------------------- | ------------ |
-| `idx_forums`        | `inverted_ts + forum` (72 bytes)                   | Newest first |
-| `idx_boards`        | `forum + inverted_ts + board` (136 bytes)          | Newest first |
-| `idx_threads`       | `forum + board + inverted_ts + thread` (200 bytes) | Newest first |
-| `idx_posts`         | `forum + thread + timestamp + post` (200 bytes)    | Oldest first |
-| `idx_post_counts`   | `forum + thread` (128 bytes)                       | N/A          |
-| `idx_mod_actions`   | `forum + mod_action` (128 bytes)                   | N/A          |
-| `idx_edits`         | `forum + target + edit` (192 bytes)                | N/A          |
-| `idx_encryption_ids`| `forum + identity` (128 bytes)                     | N/A          |
-| `idx_sealed_msgs`   | `forum + timestamp + msg` (136 bytes)              | Oldest first |
+| Index                | Key Structure                                      | Sort Order   |
+| -------------------- | -------------------------------------------------- | ------------ |
+| `idx_forums`         | `inverted_ts + forum` (72 bytes)                   | Newest first |
+| `idx_boards`         | `forum + inverted_ts + board` (136 bytes)          | Newest first |
+| `idx_threads`        | `forum + board + inverted_ts + thread` (200 bytes) | Newest first |
+| `idx_posts`          | `forum + thread + timestamp + post` (200 bytes)    | Oldest first |
+| `idx_post_counts`    | `forum + thread` (128 bytes)                       | N/A          |
+| `idx_mod_actions`    | `forum + mod_action` (128 bytes)                   | N/A          |
+| `idx_edits`          | `forum + target + edit` (192 bytes)                | N/A          |
+| `idx_encryption_ids` | `forum + identity` (128 bytes)                     | N/A          |
+| `idx_sealed_msgs`    | `forum + timestamp + msg` (136 bytes)              | Oldest first |
 
 This enables O(page_size) queries with early termination instead of O(all_nodes), reducing page loads from 300ms to 2-10ms.
 

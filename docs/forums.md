@@ -221,17 +221,17 @@ The client storage maintains indexes for fast queries. Without indexes, every qu
 
 Indexes embed timestamps directly in keys to enable sorted iteration without post-processing. This allows cursor-based pagination with early termination.
 
-| Index               | Key Structure                                                | Size      | Sort Order    |
-| ------------------- | ------------------------------------------------------------ | --------- | ------------- |
-| `idx_forums`        | `inverted_timestamp + forum_hash`                            | 72 bytes  | Newest first  |
-| `idx_boards`        | `forum_hash + inverted_timestamp + board_hash`               | 136 bytes | Newest first  |
-| `idx_threads`       | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes | Newest first  |
-| `idx_posts`         | `forum_hash + thread_hash + timestamp + post_hash`           | 200 bytes | Oldest first  |
-| `idx_post_counts`   | `forum_hash + thread_hash`                                   | 128 bytes | N/A (counter) |
-| `idx_mod_actions`   | `forum_hash + mod_action_hash`                               | 128 bytes | N/A           |
-| `idx_edits`         | `forum_hash + target_hash + edit_hash`                       | 192 bytes | N/A           |
-| `idx_encryption_ids`| `forum_hash + identity_hash`                                 | 128 bytes | N/A           |
-| `idx_sealed_msgs`   | `forum_hash + timestamp + msg_hash`                          | 136 bytes | Oldest first  |
+| Index                | Key Structure                                                | Size      | Sort Order    |
+| -------------------- | ------------------------------------------------------------ | --------- | ------------- |
+| `idx_forums`         | `inverted_timestamp + forum_hash`                            | 72 bytes  | Newest first  |
+| `idx_boards`         | `forum_hash + inverted_timestamp + board_hash`               | 136 bytes | Newest first  |
+| `idx_threads`        | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes | Newest first  |
+| `idx_posts`          | `forum_hash + thread_hash + timestamp + post_hash`           | 200 bytes | Oldest first  |
+| `idx_post_counts`    | `forum_hash + thread_hash`                                   | 128 bytes | N/A (counter) |
+| `idx_mod_actions`    | `forum_hash + mod_action_hash`                               | 128 bytes | N/A           |
+| `idx_edits`          | `forum_hash + target_hash + edit_hash`                       | 192 bytes | N/A           |
+| `idx_encryption_ids` | `forum_hash + identity_hash`                                 | 128 bytes | N/A           |
+| `idx_sealed_msgs`    | `forum_hash + timestamp + msg_hash`                          | 136 bytes | Oldest first  |
 
 **Timestamp Encoding:**
 
@@ -251,6 +251,7 @@ struct Cursor {
 ```
 
 The pagination algorithm:
+
 1. Seek to cursor position in index using prefix + timestamp
 2. Iterate forward, collecting items until limit reached
 3. Stop iteration early (no need to scan remaining items)
@@ -258,13 +259,13 @@ The pagination algorithm:
 
 **Performance:**
 
-| Query            | Without Indexes | With Indexes                |
-| ---------------- | --------------- | --------------------------- |
-| List boards      | O(all nodes)    | O(page_size)                |
-| List threads     | O(all nodes)    | O(page_size)                |
-| List posts       | O(all nodes)    | O(page_size)                |
-| Get post count   | O(all nodes)    | O(1)                        |
-| Paginate 10 of 1000 | O(1000)      | O(10) with early termination |
+| Query               | Without Indexes | With Indexes                 |
+| ------------------- | --------------- | ---------------------------- |
+| List boards         | O(all nodes)    | O(page_size)                 |
+| List threads        | O(all nodes)    | O(page_size)                 |
+| List posts          | O(all nodes)    | O(page_size)                 |
+| Get post count      | O(all nodes)    | O(1)                         |
+| Paginate 10 of 1000 | O(1000)         | O(10) with early termination |
 
 For forums with 1000+ nodes, this reduces page load times from 300-400ms to 2-10ms.
 
