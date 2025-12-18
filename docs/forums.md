@@ -197,14 +197,20 @@ pqpgp_relay_data/
 ```
 pqpgp_forum_data/
 └── forum_db/
-    ├── Column: nodes           # {forum_hash}:{node_hash} → DagNode
-    ├── Column: forums          # {forum_hash} → ForumMetadata
-    ├── Column: heads           # {forum_hash} → Vec<ContentHash>
-    ├── Column: meta            # forum_list → [forum_hashes]
-    ├── Column: idx_boards      # {forum}:{board} → timestamp
-    ├── Column: idx_threads     # {forum}:{board}:{thread} → timestamp
-    ├── Column: idx_posts       # {forum}:{thread}:{post} → timestamp
-    └── Column: idx_post_counts # {forum}:{thread} → u64 count
+    ├── Column: nodes             # {forum_hash}:{node_hash} → DagNode
+    ├── Column: forums            # {forum_hash} → ForumMetadata
+    ├── Column: heads             # {forum_hash} → Vec<ContentHash>
+    ├── Column: meta              # forum_list → [forum_hashes]
+    ├── Column: private           # Private data (conversation sessions, etc.)
+    ├── Column: idx_forums        # Sorted index for forum listing
+    ├── Column: idx_boards        # Sorted index for board listing
+    ├── Column: idx_threads       # Sorted index for thread listing
+    ├── Column: idx_posts         # Sorted index for post listing
+    ├── Column: idx_post_counts   # Reply count cache per thread
+    ├── Column: idx_mod_actions   # Index for moderation actions
+    ├── Column: idx_edits         # Index for edit nodes
+    ├── Column: idx_encryption_ids # Index for PM encryption identities
+    └── Column: idx_sealed_msgs   # Index for sealed private messages
 ```
 
 ### Query Indexes
@@ -215,13 +221,17 @@ The client storage maintains indexes for fast queries. Without indexes, every qu
 
 Indexes embed timestamps directly in keys to enable sorted iteration without post-processing. This allows cursor-based pagination with early termination.
 
-| Index             | Key Structure                                              | Size      | Sort Order    |
-| ----------------- | ---------------------------------------------------------- | --------- | ------------- |
-| `idx_forums`      | `inverted_timestamp + forum_hash`                          | 72 bytes  | Newest first  |
-| `idx_boards`      | `forum_hash + inverted_timestamp + board_hash`             | 136 bytes | Newest first  |
-| `idx_threads`     | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes | Newest first  |
-| `idx_posts`       | `forum_hash + thread_hash + timestamp + post_hash`         | 200 bytes | Oldest first  |
-| `idx_post_counts` | `forum_hash + thread_hash`                                 | 128 bytes | N/A (counter) |
+| Index               | Key Structure                                                | Size      | Sort Order    |
+| ------------------- | ------------------------------------------------------------ | --------- | ------------- |
+| `idx_forums`        | `inverted_timestamp + forum_hash`                            | 72 bytes  | Newest first  |
+| `idx_boards`        | `forum_hash + inverted_timestamp + board_hash`               | 136 bytes | Newest first  |
+| `idx_threads`       | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes | Newest first  |
+| `idx_posts`         | `forum_hash + thread_hash + timestamp + post_hash`           | 200 bytes | Oldest first  |
+| `idx_post_counts`   | `forum_hash + thread_hash`                                   | 128 bytes | N/A (counter) |
+| `idx_mod_actions`   | `forum_hash + mod_action_hash`                               | 128 bytes | N/A           |
+| `idx_edits`         | `forum_hash + target_hash + edit_hash`                       | 192 bytes | N/A           |
+| `idx_encryption_ids`| `forum_hash + identity_hash`                                 | 128 bytes | N/A           |
+| `idx_sealed_msgs`   | `forum_hash + timestamp + msg_hash`                          | 136 bytes | Oldest first  |
 
 **Timestamp Encoding:**
 

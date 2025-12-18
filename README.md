@@ -526,27 +526,37 @@ bin/web/
 ```
 pqpgp_forum_data/
 └── forum_db/                    # RocksDB database
-    ├── Column: nodes            # {forum_hash}:{node_hash} → DagNode
-    ├── Column: forums           # {forum_hash} → ForumMetadata
-    ├── Column: heads            # {forum_hash} → Vec<ContentHash>
-    ├── Column: meta             # forum_list → [forum_hashes]
-    ├── Column: idx_forums       # Sorted index for forum listing
-    ├── Column: idx_boards       # Sorted index for board listing
-    ├── Column: idx_threads      # Sorted index for thread listing
-    ├── Column: idx_posts        # Sorted index for post listing
-    └── Column: idx_post_counts  # Reply count cache
+    ├── Column: nodes              # {forum_hash}:{node_hash} → DagNode
+    ├── Column: forums             # {forum_hash} → ForumMetadata
+    ├── Column: heads              # {forum_hash} → Vec<ContentHash>
+    ├── Column: meta               # forum_list → [forum_hashes]
+    ├── Column: private            # Private data (conversation sessions, etc.)
+    ├── Column: idx_forums         # Sorted index for forum listing
+    ├── Column: idx_boards         # Sorted index for board listing
+    ├── Column: idx_threads        # Sorted index for thread listing
+    ├── Column: idx_posts          # Sorted index for post listing
+    ├── Column: idx_post_counts    # Reply count cache per thread
+    ├── Column: idx_mod_actions    # Index for moderation actions
+    ├── Column: idx_edits          # Index for edit nodes
+    ├── Column: idx_encryption_ids # Index for PM encryption identities
+    └── Column: idx_sealed_msgs    # Index for sealed private messages
 ```
 
 **Query Indexes:**
 
 Indexes embed timestamps in keys for efficient sorted iteration and cursor-based pagination:
 
-| Index           | Key Structure                                    | Sort Order   |
-| --------------- | ------------------------------------------------ | ------------ |
-| `idx_forums`    | `inverted_ts + forum` (72 bytes)                 | Newest first |
-| `idx_boards`    | `forum + inverted_ts + board` (136 bytes)        | Newest first |
-| `idx_threads`   | `forum + board + inverted_ts + thread` (200 bytes) | Newest first |
-| `idx_posts`     | `forum + thread + timestamp + post` (200 bytes)  | Oldest first |
+| Index               | Key Structure                                      | Sort Order   |
+| ------------------- | -------------------------------------------------- | ------------ |
+| `idx_forums`        | `inverted_ts + forum` (72 bytes)                   | Newest first |
+| `idx_boards`        | `forum + inverted_ts + board` (136 bytes)          | Newest first |
+| `idx_threads`       | `forum + board + inverted_ts + thread` (200 bytes) | Newest first |
+| `idx_posts`         | `forum + thread + timestamp + post` (200 bytes)    | Oldest first |
+| `idx_post_counts`   | `forum + thread` (128 bytes)                       | N/A          |
+| `idx_mod_actions`   | `forum + mod_action` (128 bytes)                   | N/A          |
+| `idx_edits`         | `forum + target + edit` (192 bytes)                | N/A          |
+| `idx_encryption_ids`| `forum + identity` (128 bytes)                     | N/A          |
+| `idx_sealed_msgs`   | `forum + timestamp + msg` (136 bytes)              | Oldest first |
 
 This enables O(page_size) queries with early termination instead of O(all_nodes), reducing page loads from 300ms to 2-10ms.
 

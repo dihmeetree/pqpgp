@@ -68,6 +68,8 @@ const CF_IDX_POSTS: &str = "idx_posts"; // forum_hash + thread_hash + timestamp 
 const CF_IDX_POST_COUNTS: &str = "idx_post_counts"; // forum_hash + thread_hash -> u64 count
 const CF_IDX_MOD_ACTIONS: &str = "idx_mod_actions"; // forum_hash + mod_action_hash -> timestamp
 const CF_IDX_EDITS: &str = "idx_edits"; // forum_hash + target_hash + edit_hash -> timestamp
+const CF_IDX_ENCRYPTION_IDS: &str = "idx_encryption_ids"; // forum_hash + identity_hash -> timestamp
+const CF_IDX_SEALED_MSGS: &str = "idx_sealed_msgs"; // forum_hash + timestamp + msg_hash -> () (sorted for scan)
 
 /// Key for the forum list in the meta column family.
 const META_FORUM_LIST: &[u8] = b"forum_list";
@@ -181,6 +183,8 @@ impl ForumStorage {
             CF_IDX_POST_COUNTS,
             CF_IDX_MOD_ACTIONS,
             CF_IDX_EDITS,
+            CF_IDX_ENCRYPTION_IDS,
+            CF_IDX_SEALED_MSGS,
         ];
 
         let db = RocksDbHandle::open(&db_path, &config, column_families)?;
@@ -246,13 +250,25 @@ impl ForumStorage {
                 true
             })?;
 
+        // Check encryption identity index (128 bytes: forum_hash 64 + identity_hash 64)
+        let mut has_encryption_id_index = false;
+        self.db
+            .prefix_iterate(CF_IDX_ENCRYPTION_IDS, first_forum.as_bytes(), |key, _| {
+                if key.len() == 128 {
+                    has_encryption_id_index = true;
+                    return false;
+                }
+                true
+            })?;
+
         info!(
-            "Index check for forum {}: forum_idx={}, new_format={}, old_format={}, mod_actions={}",
+            "Index check for forum {}: forum_idx={}, new_format={}, old_format={}, mod_actions={}, enc_ids={}",
             first_forum.short(),
             has_forum_index,
             has_new_format_indexes,
             has_old_format_indexes,
-            has_mod_action_indexes
+            has_mod_action_indexes,
+            has_encryption_id_index
         );
 
         // Need to rebuild if:
@@ -260,10 +276,11 @@ impl ForumStorage {
         // 2. No board indexes at all (but forum has boards)
         // 3. Old format indexes exist (need to migrate to new sorted format)
         // 4. Mod action indexes are missing
+        // 5. Encryption identity index is missing (new index)
         let needs_rebuild = if !has_forum_index {
             info!("Forum index missing, will rebuild");
             true
-        } else if has_new_format_indexes && has_mod_action_indexes {
+        } else if has_new_format_indexes && has_mod_action_indexes && has_encryption_id_index {
             false // Already have new format with all indexes
         } else if has_old_format_indexes {
             info!("Old index format detected, rebuilding for sorted pagination...");
@@ -284,6 +301,9 @@ impl ForumStorage {
             board_count > 0
         } else if !has_mod_action_indexes {
             info!("Mod action index missing, will rebuild");
+            true
+        } else if !has_encryption_id_index {
+            info!("Encryption identity index missing, will rebuild");
             true
         } else {
             false
@@ -423,6 +443,32 @@ impl ForumStorage {
         key
     }
 
+    /// Creates an index key for encryption identity: forum_hash + identity_hash (128 bytes).
+    fn encryption_identity_index_key(
+        forum_hash: &ContentHash,
+        identity_hash: &ContentHash,
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(identity_hash.as_bytes());
+        key
+    }
+
+    /// Creates an index key for sealed message: forum_hash + timestamp + msg_hash (136 bytes).
+    ///
+    /// Timestamp is included for sorted iteration during message scanning.
+    fn sealed_message_index_key(
+        forum_hash: &ContentHash,
+        timestamp: u64,
+        msg_hash: &ContentHash,
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(136);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(&timestamp.to_be_bytes()); // Oldest first for scanning
+        key.extend_from_slice(msg_hash.as_bytes());
+        key
+    }
+
     // ========================================================================
     // Core Node Storage
     // ========================================================================
@@ -500,6 +546,22 @@ impl ForumStorage {
                 let idx_key = Self::edit_index_key(forum_hash, edit.target_hash(), edit.hash());
                 self.db
                     .put_raw(CF_IDX_EDITS, &idx_key, &edit.created_at().to_be_bytes())?;
+            }
+            DagNode::EncryptionIdentity(identity) => {
+                // Index: forum + identity_hash -> timestamp
+                let idx_key = Self::encryption_identity_index_key(forum_hash, identity.hash());
+                self.db.put_raw(
+                    CF_IDX_ENCRYPTION_IDS,
+                    &idx_key,
+                    &identity.content.created_at.to_be_bytes(),
+                )?;
+            }
+            DagNode::SealedPrivateMessage(msg) => {
+                // Index: forum + timestamp + msg_hash -> () (for sorted scanning)
+                let idx_key =
+                    Self::sealed_message_index_key(forum_hash, msg.created_at(), msg.hash());
+                self.db
+                    .put_raw(CF_IDX_SEALED_MSGS, &idx_key, msg.hash().as_bytes())?;
             }
             // Other node types don't need indexes for the main queries
             _ => {}
@@ -869,6 +931,10 @@ impl ForumStorage {
         self.db
             .prefix_delete(CF_IDX_MOD_ACTIONS, forum_hash.as_bytes())?;
         self.db.prefix_delete(CF_IDX_EDITS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_ENCRYPTION_IDS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_SEALED_MSGS, forum_hash.as_bytes())?;
 
         // Load all nodes and rebuild indexes
         let nodes = self.load_forum_nodes(forum_hash)?;
@@ -877,6 +943,8 @@ impl ForumStorage {
         let mut post_count = 0;
         let mut mod_action_count = 0;
         let mut edit_count = 0;
+        let mut encryption_id_count = 0;
+        let mut sealed_msg_count = 0;
 
         for node in &nodes {
             match node {
@@ -924,6 +992,22 @@ impl ForumStorage {
                         .put_raw(CF_IDX_EDITS, &idx_key, &edit.created_at().to_be_bytes())?;
                     edit_count += 1;
                 }
+                DagNode::EncryptionIdentity(identity) => {
+                    let idx_key = Self::encryption_identity_index_key(forum_hash, identity.hash());
+                    self.db.put_raw(
+                        CF_IDX_ENCRYPTION_IDS,
+                        &idx_key,
+                        &identity.content.created_at.to_be_bytes(),
+                    )?;
+                    encryption_id_count += 1;
+                }
+                DagNode::SealedPrivateMessage(msg) => {
+                    let idx_key =
+                        Self::sealed_message_index_key(forum_hash, msg.created_at(), msg.hash());
+                    self.db
+                        .put_raw(CF_IDX_SEALED_MSGS, &idx_key, msg.hash().as_bytes())?;
+                    sealed_msg_count += 1;
+                }
                 _ => {}
             }
         }
@@ -943,8 +1027,8 @@ impl ForumStorage {
         }
 
         info!(
-            "Rebuilt indexes: {} boards, {} threads, {} posts, {} mod actions, {} edits",
-            board_count, thread_count, post_count, mod_action_count, edit_count
+            "Rebuilt indexes: {} boards, {} threads, {} posts, {} mod actions, {} edits, {} encryption IDs, {} sealed msgs",
+            board_count, thread_count, post_count, mod_action_count, edit_count, encryption_id_count, sealed_msg_count
         );
         Ok(())
     }
@@ -1837,23 +1921,35 @@ impl ForumStorage {
 
     /// Lists all encryption identities in a forum.
     pub fn list_encryption_identities(&self, forum_hash: &ContentHash) -> Result<Vec<ContentHash>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let hashes: Vec<ContentHash> = nodes
-            .iter()
-            .filter_map(|n| n.as_encryption_identity())
-            .map(|e| *e.hash())
-            .collect();
+        // Use the index for O(identities) instead of O(all_nodes)
+        let mut hashes = Vec::new();
+        self.db
+            .prefix_iterate(CF_IDX_ENCRYPTION_IDS, forum_hash.as_bytes(), |key, _| {
+                // Key: forum_hash (64) + identity_hash (64) = 128 bytes
+                if key.len() == 128 {
+                    let identity_hash = ContentHash::from_bytes(key[64..128].try_into().unwrap());
+                    hashes.push(identity_hash);
+                }
+                true
+            })?;
         Ok(hashes)
     }
 
     /// Lists all sealed messages in a forum.
+    ///
+    /// Returns messages sorted by timestamp (oldest first) for efficient scanning.
     pub fn list_sealed_messages(&self, forum_hash: &ContentHash) -> Result<Vec<ContentHash>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let hashes: Vec<ContentHash> = nodes
-            .iter()
-            .filter_map(|n| n.as_sealed_private_message())
-            .map(|m| *m.hash())
-            .collect();
+        // Use the index for O(messages) instead of O(all_nodes)
+        let mut hashes = Vec::new();
+        self.db
+            .prefix_iterate(CF_IDX_SEALED_MSGS, forum_hash.as_bytes(), |key, _| {
+                // Key: forum_hash (64) + timestamp (8) + msg_hash (64) = 136 bytes
+                if key.len() == 136 {
+                    let msg_hash = ContentHash::from_bytes(key[72..136].try_into().unwrap());
+                    hashes.push(msg_hash);
+                }
+                true
+            })?;
         Ok(hashes)
     }
 

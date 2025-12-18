@@ -3657,6 +3657,7 @@ fn find_our_encryption_identity(
 /// PM Inbox page handler.
 pub async fn pm_inbox_page(
     Path(forum_hash_str): Path<String>,
+    Query(pagination): Query<PaginationQuery>,
     State(app_state): State<AppState>,
     session: Session,
 ) -> impl IntoResponse {
@@ -3724,33 +3725,60 @@ pub async fn pm_inbox_page(
         })
         .collect();
 
-    // Load conversation manager to get conversations
-    let conversations = match app_state.forum_persistence.load_conversation_manager() {
-        Ok(manager) => {
-            manager
-                .all_sessions()
-                .map(|conv_session| {
-                    let id = hex::encode(conv_session.conversation_id().as_bytes());
-                    let peer_fp = conv_session.peer_identity_hash().to_hex();
-                    ConversationInfo {
-                        id: id.clone(),
-                        id_short: format!("{}...", &id[..16.min(id.len())]),
-                        peer_fingerprint: peer_fp.clone(),
-                        peer_short: format!("{}...", &peer_fp[..16.min(peer_fp.len())]),
-                        last_message_preview: "...".to_string(), // TODO: Get from message history
-                        last_activity_display: format_timestamp_display(
-                            conv_session.last_activity(),
-                        ),
-                        message_count: (conv_session.messages_sent()
-                            + conv_session.messages_received())
-                            as usize,
-                        has_unread: false, // TODO: Track unread status
-                    }
-                })
-                .collect()
+    // Parse cursor if provided (format: "timestamp:conversation_id_hex")
+    let cursor = pagination.cursor.as_ref().and_then(|c| {
+        let parts: Vec<&str> = c.split(':').collect();
+        if parts.len() == 2 {
+            let ts = parts[0].parse::<u64>().ok()?;
+            let conv_id_bytes = hex::decode(parts[1]).ok()?;
+            if conv_id_bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&conv_id_bytes);
+                Some((ts, arr))
+            } else {
+                None
+            }
+        } else {
+            None
         }
-        _ => Vec::new(),
-    };
+    });
+
+    // Load conversation manager to get conversations with pagination
+    let (conversations, total_conversations, next_cursor, has_more) =
+        match app_state.forum_persistence.load_conversation_manager() {
+            Ok(manager) => {
+                let total = manager.total_conversations();
+                let (sessions, next) = manager.all_sessions_paginated(cursor, DEFAULT_PAGE_SIZE);
+
+                let convs: Vec<ConversationInfo> = sessions
+                    .into_iter()
+                    .map(|conv_session| {
+                        let id = hex::encode(conv_session.conversation_id().as_bytes());
+                        let peer_fp = conv_session.peer_identity_hash().to_hex();
+                        ConversationInfo {
+                            id: id.clone(),
+                            id_short: format!("{}...", &id[..16.min(id.len())]),
+                            peer_fingerprint: peer_fp.clone(),
+                            peer_short: format!("{}...", &peer_fp[..16.min(peer_fp.len())]),
+                            last_message_preview: "...".to_string(),
+                            last_activity_display: format_timestamp_display(
+                                conv_session.last_activity(),
+                            ),
+                            message_count: (conv_session.messages_sent()
+                                + conv_session.messages_received())
+                                as usize,
+                            has_unread: false,
+                        }
+                    })
+                    .collect();
+
+                let has_more = next.is_some();
+                let next_cursor_str = next.map(|(ts, id)| format!("{}:{}", ts, hex::encode(id)));
+
+                (convs, total, next_cursor_str, has_more)
+            }
+            _ => (Vec::new(), 0, None, false),
+        };
 
     let template = PMInboxTemplate {
         active_page: "forum".to_string(),
@@ -3765,6 +3793,11 @@ pub async fn pm_inbox_page(
         error: None,
         has_result: false,
         has_error: false,
+        prev_cursor: pagination.prev.clone(),
+        next_cursor,
+        current_cursor: pagination.cursor.clone(),
+        total_conversations,
+        has_more,
     };
 
     Html(
@@ -4381,6 +4414,7 @@ pub async fn pm_compose_page(
 /// View conversation page handler.
 pub async fn pm_conversation_page(
     Path((forum_hash_str, conversation_id_str)): Path<(String, String)>,
+    Query(pagination): Query<PaginationQuery>,
     State(app_state): State<AppState>,
     session: Session,
 ) -> impl IntoResponse {
@@ -4451,22 +4485,42 @@ pub async fn pm_conversation_page(
 
     let peer_fp = session_data.peer_identity_hash().to_hex();
 
-    // Get messages
-    let messages: Vec<PrivateMessageInfo> = conversation_manager
-        .get_messages(&conversation_id)
-        .map(|msgs| {
-            msgs.iter()
-                .map(|m| PrivateMessageInfo {
-                    message_id: hex::encode(m.inner.message_id),
-                    body: m.inner.body.clone(),
-                    subject: m.inner.subject.clone(),
-                    is_outgoing: m.is_outgoing,
-                    timestamp_display: format_timestamp_display(m.processed_at),
-                    reply_to: m.inner.reply_to.map(hex::encode),
-                })
-                .collect()
+    // Parse cursor if provided (format: "timestamp:message_id_hex")
+    let cursor = pagination.cursor.as_ref().and_then(|c| {
+        let parts: Vec<&str> = c.split(':').collect();
+        if parts.len() == 2 {
+            let ts = parts[0].parse::<u64>().ok()?;
+            let msg_id_bytes = hex::decode(parts[1]).ok()?;
+            if msg_id_bytes.len() == 16 {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&msg_id_bytes);
+                Some((ts, arr))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    });
+
+    // Get messages with pagination
+    let (msg_refs, total_messages, next) =
+        conversation_manager.get_messages_paginated(&conversation_id, cursor, DEFAULT_PAGE_SIZE);
+
+    let messages: Vec<PrivateMessageInfo> = msg_refs
+        .into_iter()
+        .map(|m| PrivateMessageInfo {
+            message_id: hex::encode(m.inner.message_id),
+            body: m.inner.body.clone(),
+            subject: m.inner.subject.clone(),
+            is_outgoing: m.is_outgoing,
+            timestamp_display: format_timestamp_display(m.processed_at),
+            reply_to: m.inner.reply_to.map(hex::encode),
         })
-        .unwrap_or_default();
+        .collect();
+
+    let has_more = next.is_some();
+    let next_cursor = next.map(|(ts, id)| format!("{}:{}", ts, hex::encode(id)));
 
     let signing_keys = get_signing_keys();
 
@@ -4484,6 +4538,11 @@ pub async fn pm_conversation_page(
         error: None,
         has_result: false,
         has_error: false,
+        prev_cursor: pagination.prev.clone(),
+        next_cursor,
+        current_cursor: pagination.cursor.clone(),
+        total_messages,
+        has_more,
     };
 
     Html(

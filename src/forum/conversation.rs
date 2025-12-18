@@ -54,6 +54,12 @@ pub const CONVERSATION_KEY_SIZE: usize = 32;
 /// Maximum number of messages to store per conversation.
 pub const MAX_MESSAGES_PER_CONVERSATION: usize = 10000;
 
+/// Cursor for message pagination: (timestamp, first 16 bytes of message_id).
+pub type MessageCursor = (u64, [u8; 16]);
+
+/// Result of paginated message query: (messages, total_count, next_cursor).
+pub type PaginatedMessagesResult<'a> = (Vec<&'a StoredMessage>, usize, Option<MessageCursor>);
+
 /// Unique identifier for a conversation.
 ///
 /// This is derived from the X3DH key agreement and is known only to the
@@ -654,6 +660,68 @@ impl ConversationManager {
         self.sessions.values()
     }
 
+    /// Returns conversations with cursor-based pagination.
+    ///
+    /// Conversations are sorted by last activity (newest first).
+    ///
+    /// # Arguments
+    /// * `cursor` - Optional cursor (last_activity timestamp, conversation_id) to start after
+    /// * `limit` - Maximum number of conversations to return
+    ///
+    /// # Returns
+    /// A tuple of (conversations, next_cursor) where next_cursor is Some if there are more.
+    pub fn all_sessions_paginated(
+        &self,
+        cursor: Option<(u64, [u8; CONVERSATION_ID_SIZE])>,
+        limit: usize,
+    ) -> (
+        Vec<&ConversationSession>,
+        Option<(u64, [u8; CONVERSATION_ID_SIZE])>,
+    ) {
+        // Collect and sort by last_activity descending
+        let mut sessions: Vec<_> = self.sessions.values().collect();
+        sessions.sort_by(|a, b| {
+            b.last_activity().cmp(&a.last_activity()).then_with(|| {
+                b.conversation_id()
+                    .as_bytes()
+                    .cmp(a.conversation_id().as_bytes())
+            })
+        });
+
+        // Apply cursor filter
+        let filtered: Vec<_> = if let Some((cursor_ts, cursor_id)) = cursor {
+            sessions
+                .into_iter()
+                .skip_while(|s| {
+                    s.last_activity() > cursor_ts
+                        || (s.last_activity() == cursor_ts
+                            && s.conversation_id().as_bytes() >= &cursor_id)
+                })
+                .collect()
+        } else {
+            sessions
+        };
+
+        // Take limit + 1 to check if there are more
+        let has_more = filtered.len() > limit;
+        let page: Vec<_> = filtered.into_iter().take(limit).collect();
+
+        // Create next cursor from the last item
+        let next_cursor = if has_more && !page.is_empty() {
+            let last = page.last().unwrap();
+            Some((last.last_activity(), *last.conversation_id().as_bytes()))
+        } else {
+            None
+        };
+
+        (page, next_cursor)
+    }
+
+    /// Returns the total number of conversations.
+    pub fn total_conversations(&self) -> usize {
+        self.sessions.len()
+    }
+
     /// Returns the number of sessions.
     pub fn session_count(&self) -> usize {
         self.sessions.len()
@@ -706,6 +774,69 @@ impl ConversationManager {
         self.message_history
             .get(conversation_id)
             .map(|v| v.as_slice())
+    }
+
+    /// Gets messages with cursor-based pagination.
+    ///
+    /// Messages are sorted by timestamp (oldest first for chronological reading).
+    ///
+    /// # Arguments
+    /// * `conversation_id` - The conversation to get messages from
+    /// * `cursor` - Optional cursor (timestamp, message_id) to start after
+    /// * `limit` - Maximum number of messages to return
+    ///
+    /// # Returns
+    /// A tuple of (messages, total_count, next_cursor) where next_cursor is Some if there are more.
+    pub fn get_messages_paginated(
+        &self,
+        conversation_id: &[u8; CONVERSATION_ID_SIZE],
+        cursor: Option<MessageCursor>,
+        limit: usize,
+    ) -> PaginatedMessagesResult<'_> {
+        let Some(history) = self.message_history.get(conversation_id) else {
+            return (Vec::new(), 0, None);
+        };
+
+        let total_count = history.len();
+
+        // Messages are already stored in chronological order (oldest first)
+        // Apply cursor filter
+        let start_idx = if let Some((cursor_ts, cursor_msg_id)) = cursor {
+            history
+                .iter()
+                .position(|m| {
+                    m.inner.timestamp > cursor_ts
+                        || (m.inner.timestamp == cursor_ts && m.inner.message_id > cursor_msg_id)
+                })
+                .unwrap_or(history.len())
+        } else {
+            0
+        };
+
+        // Take limit + 1 to check if there are more
+        let end_idx = (start_idx + limit + 1).min(history.len());
+        let slice = &history[start_idx..end_idx];
+
+        let has_more = slice.len() > limit;
+        let page: Vec<_> = slice.iter().take(limit).collect();
+
+        // Create next cursor from the last item
+        let next_cursor = if has_more && !page.is_empty() {
+            let last = page.last().unwrap();
+            Some((last.inner.timestamp, last.inner.message_id))
+        } else {
+            None
+        };
+
+        (page, total_count, next_cursor)
+    }
+
+    /// Gets the total message count for a conversation.
+    pub fn get_message_count(&self, conversation_id: &[u8; CONVERSATION_ID_SIZE]) -> usize {
+        self.message_history
+            .get(conversation_id)
+            .map(|h| h.len())
+            .unwrap_or(0)
     }
 
     /// Finds a message by its message ID within a conversation.

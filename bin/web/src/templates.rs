@@ -416,6 +416,12 @@ pub struct PMInboxTemplate {
     pub error: Option<String>,
     pub has_result: bool,
     pub has_error: bool,
+    // Pagination
+    pub prev_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub current_cursor: Option<String>,
+    pub total_conversations: usize,
+    pub has_more: bool,
 }
 
 /// Single conversation view template.
@@ -437,6 +443,12 @@ pub struct PMConversationTemplate {
     pub error: Option<String>,
     pub has_result: bool,
     pub has_error: bool,
+    // Pagination
+    pub prev_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub current_cursor: Option<String>,
+    pub total_messages: usize,
+    pub has_more: bool,
 }
 
 /// Compose new private message template.
