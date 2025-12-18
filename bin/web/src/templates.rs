@@ -177,7 +177,6 @@ pub struct ForumDisplayInfo {
     pub hash: String,
     pub name: String,
     pub description: String,
-    pub node_count: usize,
     pub created_at_display: String,
 }
 
@@ -231,6 +230,12 @@ pub struct ForumListTemplate {
     pub error: Option<String>,
     pub has_result: bool,
     pub has_error: bool,
+    // Pagination
+    pub prev_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub current_cursor: Option<String>,
+    pub total_forums: usize,
+    pub has_more: bool,
 }
 
 /// Single forum view template
@@ -253,6 +258,12 @@ pub struct ForumViewTemplate {
     pub error: Option<String>,
     pub has_result: bool,
     pub has_error: bool,
+    // Pagination
+    pub prev_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub current_cursor: Option<String>,
+    pub total_boards: usize,
+    pub has_more: bool,
 }
 
 /// Board view template
@@ -275,6 +286,12 @@ pub struct BoardViewTemplate {
     pub error: Option<String>,
     pub has_result: bool,
     pub has_error: bool,
+    // Pagination
+    pub prev_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub current_cursor: Option<String>,
+    pub total_threads: usize,
+    pub has_more: bool,
 }
 
 /// Thread view template
@@ -302,6 +319,12 @@ pub struct ThreadViewTemplate {
     pub error: Option<String>,
     pub has_result: bool,
     pub has_error: bool,
+    // Pagination
+    pub prev_cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub current_cursor: Option<String>,
+    pub total_posts: usize,
+    pub has_more: bool,
 }
 
 // ============================================================================

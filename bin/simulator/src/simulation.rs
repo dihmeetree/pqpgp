@@ -59,6 +59,11 @@ impl Simulation {
         self.forum_hash.as_ref()
     }
 
+    /// Returns the first board hash if any boards exist.
+    pub fn board_hash(&self) -> Option<&ContentHash> {
+        self.boards.first()
+    }
+
     /// Returns Alice's user info.
     pub fn alice(&self) -> &SimulatedUser {
         &self.alice

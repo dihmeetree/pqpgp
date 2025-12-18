@@ -36,23 +36,68 @@ Actions are paced with random delays (500ms-2s) to simulate realistic usage.
 
 ### Security Testing
 
-Eve continuously attempts various attacks against Bob's relay to verify security controls:
+Eve continuously attempts various attacks against Bob's relay to verify security controls. The simulator includes 26 different attack types organized by category:
 
-| Attack                    | Description                                                 | Expected Result               |
-| ------------------------- | ----------------------------------------------------------- | ----------------------------- |
-| `forge_signature`         | Sign content with wrong key while claiming another identity | Rejected (signature mismatch) |
-| `replay_node`             | Submit the same node twice                                  | Rejected (duplicate)          |
-| `invalid_parent`          | Reference non-existent parent nodes                         | Rejected (missing parents)    |
-| `wrong_forum`             | Submit node with mismatched forum hash                      | Rejected (forum mismatch)     |
-| `tampered_content`        | Modify bytes after signing                                  | Rejected (signature invalid)  |
-| `future_timestamp`        | Submit node with future timestamp                           | Rejected (clock skew)         |
-| `permission_escalation`   | Create board without moderator permission                   | Rejected (unauthorized)       |
-| `hash_mismatch`           | Submit to wrong forum endpoint                              | Rejected (forum not found)    |
-| `unauthorized_mod_action` | Add moderator without being owner                           | Rejected (not owner)          |
-| `impersonate_owner`       | Claim owner identity with different signature               | Rejected (signature mismatch) |
-| `oversized_content`       | Submit 10MB post content                                    | Rejected (size limit)         |
-| `malformed_node_data`     | Submit garbage/invalid data                                 | Rejected (parse error)        |
-| `thread_wrong_board`      | Create thread in non-existent board                         | Rejected (board not found)    |
+#### Signature & Authentication Attacks
+
+| Attack              | Description                                                 | Expected Result               |
+| ------------------- | ----------------------------------------------------------- | ----------------------------- |
+| `forge_signature`   | Sign content with wrong key while claiming another identity | Rejected (signature mismatch) |
+| `replay_node`       | Submit the same node twice                                  | Rejected (duplicate)          |
+| `tampered_content`  | Modify bytes after signing                                  | Rejected (signature invalid)  |
+| `impersonate_owner` | Claim owner identity with different signature               | Rejected (signature mismatch) |
+
+#### DAG Structure Attacks
+
+| Attack                | Description                                  | Expected Result             |
+| --------------------- | -------------------------------------------- | --------------------------- |
+| `invalid_parent`      | Reference non-existent parent nodes          | Rejected (missing parents)  |
+| `wrong_forum`         | Submit node with mismatched forum hash       | Rejected (forum mismatch)   |
+| `hash_mismatch`       | Submit to wrong forum endpoint               | Rejected (forum not found)  |
+| `thread_wrong_board`  | Create thread in non-existent board          | Rejected (board not found)  |
+| `cross_thread_parent` | Post references parent from different thread | Rejected (invalid parent)   |
+| `wrong_parent_type`   | Post claims forum genesis as parent          | Rejected (wrong node type)  |
+| `excessive_parents`   | Mod action with >50 parent hashes            | Rejected (too many parents) |
+
+#### Permission & Authorization Attacks
+
+| Attack                      | Description                              | Expected Result           |
+| --------------------------- | ---------------------------------------- | ------------------------- |
+| `permission_escalation`     | Create board without moderator rights    | Rejected (unauthorized)   |
+| `unauthorized_mod_action`   | Add moderator without being owner        | Rejected (not owner)      |
+| `remove_owner_as_moderator` | Try to remove forum owner from mods      | Rejected (cannot remove)  |
+| `cross_forum_mod_action`    | Board mod action referencing wrong forum | Rejected (forum mismatch) |
+
+#### Edit Node Attacks
+
+| Attack                    | Description                         | Expected Result          |
+| ------------------------- | ----------------------------------- | ------------------------ |
+| `unauthorized_forum_edit` | Edit forum without being owner      | Rejected (not owner)     |
+| `unauthorized_board_edit` | Edit board without moderator rights | Rejected (not moderator) |
+| `edit_wrong_target_type`  | Use forum edit on board target      | Rejected (type mismatch) |
+
+#### Moderation Target Type Attacks
+
+| Attack                   | Description                              | Expected Result          |
+| ------------------------ | ---------------------------------------- | ------------------------ |
+| `hide_wrong_target_type` | Use HideThread action on a post hash     | Rejected (type mismatch) |
+| `action_scope_mismatch`  | Board-level action on non-existent board | Rejected (board missing) |
+
+#### Timestamp Attacks
+
+| Attack              | Description                       | Expected Result       |
+| ------------------- | --------------------------------- | --------------------- |
+| `future_timestamp`  | Submit node with future timestamp | Rejected (clock skew) |
+| `ancient_timestamp` | Timestamp manipulation attack     | Rejected (signature)  |
+
+#### Content Validation Attacks
+
+| Attack                  | Description                  | Expected Result        |
+| ----------------------- | ---------------------------- | ---------------------- |
+| `oversized_content`     | Submit 10MB post content     | Rejected (size limit)  |
+| `malformed_node_data`   | Submit garbage/invalid data  | Rejected (parse error) |
+| `content_size_boundary` | Board name exceeds 100 chars | Rejected (size limit)  |
+| `empty_content_fields`  | Thread with empty title      | Rejected (empty field) |
 
 If any attack succeeds, the simulator **panics** to alert you of a security vulnerability.
 

@@ -13,7 +13,7 @@ use std::fmt;
 ///
 /// This is the content address of any DAG node. The hash is computed over
 /// the bincode-serialized content, ensuring deterministic addressing.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentHash([u8; 64]);
 
 impl Serialize for ContentHash {

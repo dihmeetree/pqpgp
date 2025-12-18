@@ -250,6 +250,48 @@ impl RocksDbHandle {
         Ok(())
     }
 
+    /// Iterates over entries starting from a seek position, filtering by a prefix.
+    ///
+    /// This is useful for cursor-based pagination where you want to seek to a specific
+    /// position in the index but still only iterate over entries with a common prefix.
+    ///
+    /// - `seek_key`: The key to seek to (start iteration from this position)
+    /// - `filter_prefix`: Only process keys that start with this prefix
+    ///
+    /// The callback receives (key, value) pairs and should return true to continue
+    /// or false to stop iteration.
+    pub fn seek_iterate<F>(
+        &self,
+        cf_name: &str,
+        seek_key: &[u8],
+        filter_prefix: &[u8],
+        mut callback: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&[u8], &[u8]) -> bool,
+    {
+        let cf = self.cf(cf_name)?;
+        let mut iter = self.db.raw_iterator_cf(&cf);
+        iter.seek(seek_key);
+
+        while iter.valid() {
+            if let (Some(key), Some(value)) = (iter.key(), iter.value()) {
+                // Stop if we've moved past the filter prefix
+                if !key.starts_with(filter_prefix) {
+                    break;
+                }
+                if !callback(key, value) {
+                    break;
+                }
+                iter.next();
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Collects all values with the given prefix, deserializing each.
     pub fn prefix_collect<T, F>(
         &self,

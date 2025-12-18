@@ -197,11 +197,75 @@ pqpgp_relay_data/
 ```
 pqpgp_forum_data/
 └── forum_db/
-    ├── Column: nodes   # {forum_hash}:{node_hash} → DagNode
-    ├── Column: forums  # {forum_hash} → ForumMetadata
-    ├── Column: heads   # {forum_hash} → Vec<ContentHash>
-    └── Column: meta    # forum_list → [forum_hashes]
+    ├── Column: nodes           # {forum_hash}:{node_hash} → DagNode
+    ├── Column: forums          # {forum_hash} → ForumMetadata
+    ├── Column: heads           # {forum_hash} → Vec<ContentHash>
+    ├── Column: meta            # forum_list → [forum_hashes]
+    ├── Column: idx_boards      # {forum}:{board} → timestamp
+    ├── Column: idx_threads     # {forum}:{board}:{thread} → timestamp
+    ├── Column: idx_posts       # {forum}:{thread}:{post} → timestamp
+    └── Column: idx_post_counts # {forum}:{thread} → u64 count
 ```
+
+### Query Indexes
+
+The client storage maintains indexes for fast queries. Without indexes, every query would need to scan and deserialize all nodes in a forum (O(n) where n = total nodes).
+
+**Index Key Structure:**
+
+Indexes embed timestamps directly in keys to enable sorted iteration without post-processing. This allows cursor-based pagination with early termination.
+
+| Index             | Key Structure                                              | Size      | Sort Order    |
+| ----------------- | ---------------------------------------------------------- | --------- | ------------- |
+| `idx_forums`      | `inverted_timestamp + forum_hash`                          | 72 bytes  | Newest first  |
+| `idx_boards`      | `forum_hash + inverted_timestamp + board_hash`             | 136 bytes | Newest first  |
+| `idx_threads`     | `forum_hash + board_hash + inverted_timestamp + thread_hash` | 200 bytes | Newest first  |
+| `idx_posts`       | `forum_hash + thread_hash + timestamp + post_hash`         | 200 bytes | Oldest first  |
+| `idx_post_counts` | `forum_hash + thread_hash`                                 | 128 bytes | N/A (counter) |
+
+**Timestamp Encoding:**
+
+- **Inverted timestamps** (`u64::MAX - timestamp`) sort newest-first in byte order (boards, threads)
+- **Non-inverted timestamps** sort oldest-first for chronological reading (posts)
+- Timestamps are stored as big-endian 8-byte values for correct byte ordering
+
+**Cursor-Based Pagination:**
+
+Cursors encode `(timestamp, hash)` pairs for stable pagination:
+
+```rust
+struct Cursor {
+    timestamp: u64,
+    hash: ContentHash,
+}
+```
+
+The pagination algorithm:
+1. Seek to cursor position in index using prefix + timestamp
+2. Iterate forward, collecting items until limit reached
+3. Stop iteration early (no need to scan remaining items)
+4. Return next cursor from last item for continuation
+
+**Performance:**
+
+| Query            | Without Indexes | With Indexes                |
+| ---------------- | --------------- | --------------------------- |
+| List boards      | O(all nodes)    | O(page_size)                |
+| List threads     | O(all nodes)    | O(page_size)                |
+| List posts       | O(all nodes)    | O(page_size)                |
+| Get post count   | O(all nodes)    | O(1)                        |
+| Paginate 10 of 1000 | O(1000)      | O(10) with early termination |
+
+For forums with 1000+ nodes, this reduces page load times from 300-400ms to 2-10ms.
+
+**Automatic migration:** When opening a database with old-format indexes (128-byte board keys instead of 136-byte), indexes are automatically rebuilt on startup:
+
+```
+Indexes have old format (128-byte board keys), rebuilding with sorted keys...
+Rebuilt indexes: X boards, Y threads, Z posts
+```
+
+**Manual rebuild:** If indexes become corrupted, call `storage.rebuild_all_indexes()` to regenerate them from the node data.
 
 ## Module Structure
 

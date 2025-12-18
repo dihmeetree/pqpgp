@@ -28,6 +28,7 @@ use pqpgp::forum::{
     permissions::ForumPermissions,
     rpc_client::{FetchResult, ForumRpcClient, RpcRequest, RpcResponse, SyncResult},
     seal_private_message,
+    storage::{Cursor, DEFAULT_PAGE_SIZE},
     types::current_timestamp_millis,
     validation::{validate_node, ValidationContext},
     BoardGenesis, ContentHash, ConversationManager, ConversationSession, DagNode, EditNode,
@@ -106,13 +107,15 @@ fn get_effective_forum_info(
 }
 
 /// Gets effective board name/description after applying edits.
+///
+/// Uses the pre-loaded board to avoid redundant disk reads.
 fn get_effective_board_info(
     persistence: &SharedForumPersistence,
     forum_hash: &ContentHash,
     board: &BoardGenesis,
 ) -> (String, String) {
     persistence
-        .get_effective_board_info(forum_hash, board.hash())
+        .apply_board_edits(forum_hash, board)
         .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
         .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()))
 }
@@ -131,6 +134,33 @@ fn build_board_display_info(
         description,
         tags: board.tags().to_vec(),
         created_at_display: format_timestamp(board.created_at()),
+    }
+}
+
+// =============================================================================
+// Pagination Query Params
+// =============================================================================
+
+/// Query parameters for paginated views.
+#[derive(Debug, Deserialize)]
+pub struct PaginationQuery {
+    /// Cursor for the current page (base64-encoded).
+    pub cursor: Option<String>,
+    /// Previous cursor to enable back navigation.
+    pub prev: Option<String>,
+    /// Optional page size override (defaults to DEFAULT_PAGE_SIZE).
+    pub limit: Option<usize>,
+}
+
+impl PaginationQuery {
+    /// Gets the limit, clamped to a reasonable range.
+    pub fn get_limit(&self) -> usize {
+        self.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, 100)
+    }
+
+    /// Decodes the cursor if present.
+    pub fn get_cursor(&self) -> Option<Cursor> {
+        self.cursor.as_ref().and_then(|s| Cursor::decode(s))
     }
 }
 
@@ -658,16 +688,6 @@ struct SigningMaterials {
     private_key: pqpgp::crypto::PrivateKey,
 }
 
-/// Get fingerprint for a key (first 16 hex chars)
-fn get_key_fingerprint(key_id: &str) -> Option<String> {
-    let keyring = create_keyring_manager().ok()?;
-    let key_id_num = u64::from_str_radix(key_id, 16).ok()?;
-    let entries = keyring.list_all_keys();
-    let (_, entry, _) = entries.iter().find(|(id, _, _)| *id == key_id_num)?;
-    let fingerprint = entry.public_key.fingerprint();
-    Some(hex::encode(&fingerprint[..8]))
-}
-
 /// Get signing materials from the keyring
 fn get_signing_materials(key_id: &str) -> Result<SigningMaterials, String> {
     let keyring = create_keyring_manager().map_err(|e| format!("Failed to load keyring: {}", e))?;
@@ -705,48 +725,55 @@ fn get_signing_materials(key_id: &str) -> Result<SigningMaterials, String> {
 pub async fn forum_list_page(
     State(app_state): State<AppState>,
     session: Session,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Html<String>, StatusCode> {
     let csrf_token = get_csrf_token(&session, &app_state.csrf_store)
         .await
         .unwrap_or_default();
 
-    // Get locally synced forums only
-    let forums: Vec<ForumDisplayInfo> = match app_state.forum_persistence.list_forums() {
-        Ok(forum_hashes) => {
-            let mut forums = Vec::new();
-            for hash in forum_hashes {
-                if let Ok(Some(metadata)) = app_state.forum_persistence.load_forum_metadata(&hash) {
-                    // Count nodes for this forum
-                    let node_count = app_state
-                        .forum_persistence
-                        .load_forum_nodes(&hash)
-                        .map(|nodes| nodes.len())
-                        .unwrap_or(0);
+    let cursor = pagination.get_cursor();
+    let limit = pagination.get_limit();
 
-                    // Get effective name/description after applying edits
-                    let (name, description) = get_effective_forum_info(
-                        &app_state.forum_persistence,
-                        &hash,
-                        &metadata.name,
-                        &metadata.description,
-                    );
-
-                    forums.push(ForumDisplayInfo {
-                        hash: hash.to_hex(),
-                        name,
-                        description,
-                        node_count,
-                        created_at_display: format_timestamp(metadata.created_at),
-                    });
-                }
-            }
-            forums
-        }
-        Err(e) => {
+    // Get locally synced forums with pagination
+    let paginated_result = app_state
+        .forum_persistence
+        .list_forums_paginated(cursor.as_ref(), limit)
+        .unwrap_or_else(|e| {
             warn!("Failed to list local forums: {}", e);
-            Vec::new()
-        }
-    };
+            pqpgp::forum::PaginatedResult {
+                items: Vec::new(),
+                next_cursor: None,
+                total_count: Some(0),
+            }
+        });
+
+    let has_more = paginated_result.next_cursor.is_some();
+    let total_forums = paginated_result.total_count.unwrap_or(0);
+
+    let forums: Vec<ForumDisplayInfo> = paginated_result
+        .items
+        .iter()
+        .map(|(hash, metadata)| {
+            // Get effective name/description after applying edits
+            let (name, description) = get_effective_forum_info(
+                &app_state.forum_persistence,
+                hash,
+                &metadata.name,
+                &metadata.description,
+            );
+
+            ForumDisplayInfo {
+                hash: hash.to_hex(),
+                name,
+                description,
+                created_at_display: format_timestamp(metadata.created_at),
+            }
+        })
+        .collect();
+
+    let next_cursor = paginated_result.next_cursor.as_ref().map(|c| c.encode());
+    let prev_cursor = pagination.prev.clone();
+    let current_cursor = pagination.cursor.clone();
 
     let template = ForumListTemplate {
         active_page: "forum".to_string(),
@@ -757,6 +784,11 @@ pub async fn forum_list_page(
         error: None,
         has_result: false,
         has_error: false,
+        prev_cursor,
+        next_cursor,
+        current_cursor,
+        total_forums,
+        has_more,
     };
 
     Ok(Html(template.to_string()))
@@ -914,6 +946,7 @@ pub async fn forum_view_page(
     State(app_state): State<AppState>,
     session: Session,
     Path(forum_hash): Path<String>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Html<String>, StatusCode> {
     // Forum data is synced by background polling task - read from local storage
 
@@ -946,19 +979,46 @@ pub async fn forum_view_page(
         }
     };
 
-    // Load boards from local storage (filtering out hidden boards for non-moderators)
+    // Load boards with pagination
     let hidden_boards = app_state
         .forum_persistence
         .get_hidden_boards(&forum_content_hash)
         .unwrap_or_default();
-    let boards: Vec<BoardDisplayInfo> = app_state
+
+    let cursor = pagination.get_cursor();
+    let limit = pagination.get_limit();
+
+    let paginated_result = app_state
         .forum_persistence
-        .get_boards(&forum_content_hash)
-        .unwrap_or_default()
+        .get_boards_paginated(&forum_content_hash, cursor.as_ref(), limit + 1) // +1 to check for more
+        .unwrap_or_else(|_| pqpgp::forum::PaginatedResult {
+            items: Vec::new(),
+            next_cursor: None,
+            total_count: Some(0),
+        });
+
+    // Filter hidden boards and apply limit
+    let filtered_boards: Vec<_> = paginated_result
+        .items
         .into_iter()
         .filter(|b| !hidden_boards.contains(b.hash()))
+        .collect();
+
+    let has_more = filtered_boards.len() > limit;
+    let boards: Vec<BoardDisplayInfo> = filtered_boards
+        .into_iter()
+        .take(limit)
         .map(|b| build_board_display_info(&app_state.forum_persistence, &forum_content_hash, &b))
         .collect();
+
+    // Compute next cursor from the last item
+    let next_cursor = if has_more {
+        paginated_result.next_cursor.as_ref().map(|c| c.encode())
+    } else {
+        None
+    };
+
+    let total_boards = paginated_result.total_count.unwrap_or(0);
 
     // Load moderators from local storage
     let (mod_fingerprints, owner_fingerprint) = app_state
@@ -976,21 +1036,21 @@ pub async fn forum_view_page(
 
     // Get user's signing keys to check if they're an owner or moderator
     let signing_keys = get_signing_keys();
-    let user_fingerprints: Vec<String> = signing_keys
+    let user_fingerprints: Vec<&str> = signing_keys
         .iter()
-        .map(|k| get_key_fingerprint(&k.key_id).unwrap_or_default())
+        .map(|k| k.fingerprint.as_str())
         .collect();
 
     // Check if user is owner (exact match required for security)
     let is_owner = owner_fingerprint
         .as_ref()
-        .map(|owner_fp| user_fingerprints.iter().any(|fp| fp == owner_fp))
+        .map(|owner_fp| user_fingerprints.iter().any(|fp| *fp == owner_fp))
         .unwrap_or(false);
 
     // Check if user is a moderator (owner or regular mod) - exact match required
     let is_moderator = mod_fingerprints
         .iter()
-        .any(|mod_fp| user_fingerprints.iter().any(|fp| fp == mod_fp));
+        .any(|mod_fp| user_fingerprints.iter().any(|fp| *fp == mod_fp));
 
     // Get effective forum name/description (after applying any edits)
     let (forum_name, forum_description) = get_effective_forum_info(
@@ -999,6 +1059,10 @@ pub async fn forum_view_page(
         &metadata.name,
         &metadata.description,
     );
+
+    // Pagination: prev_cursor comes from query param, current_cursor is what we used
+    let prev_cursor = pagination.prev.clone();
+    let current_cursor = pagination.cursor.clone();
 
     let template = ForumViewTemplate {
         active_page: "forum".to_string(),
@@ -1017,6 +1081,11 @@ pub async fn forum_view_page(
         error: None,
         has_result: false,
         has_error: false,
+        prev_cursor,
+        next_cursor,
+        current_cursor,
+        total_boards,
+        has_more,
     };
 
     Ok(Html(template.to_string()))
@@ -1131,6 +1200,7 @@ pub async fn board_view_page(
     State(app_state): State<AppState>,
     session: Session,
     Path((forum_hash, board_hash)): Path<(String, String)>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Html<String>, StatusCode> {
     // Forum data is synced by background polling task - read from local storage
 
@@ -1174,18 +1244,40 @@ pub async fn board_view_page(
         }
     };
 
-    // Load threads from local storage (newest first)
+    // Load threads with pagination
     let hidden_threads = app_state
         .forum_persistence
         .get_hidden_threads(&forum_content_hash)
         .unwrap_or_default();
 
-    let threads: Vec<ThreadDisplayInfo> = app_state
+    let cursor = pagination.get_cursor();
+    let limit = pagination.get_limit();
+
+    let paginated_result = app_state
         .forum_persistence
-        .get_threads(&forum_content_hash, &board_content_hash)
-        .unwrap_or_default()
+        .get_threads_paginated(
+            &forum_content_hash,
+            &board_content_hash,
+            cursor.as_ref(),
+            limit + 1,
+        )
+        .unwrap_or_else(|_| pqpgp::forum::PaginatedResult {
+            items: Vec::new(),
+            next_cursor: None,
+            total_count: Some(0),
+        });
+
+    // Filter hidden threads and apply limit
+    let filtered_threads: Vec<_> = paginated_result
+        .items
         .into_iter()
         .filter(|t| !hidden_threads.contains(t.hash()))
+        .collect();
+
+    let has_more = filtered_threads.len() > limit;
+    let threads: Vec<ThreadDisplayInfo> = filtered_threads
+        .into_iter()
+        .take(limit)
         .map(|t| {
             let post_count = app_state
                 .forum_persistence
@@ -1202,6 +1294,14 @@ pub async fn board_view_page(
             }
         })
         .collect();
+
+    let next_cursor = if has_more {
+        paginated_result.next_cursor.as_ref().map(|c| c.encode())
+    } else {
+        None
+    };
+
+    let total_threads = paginated_result.total_count.unwrap_or(0);
 
     // Load forum moderators from local storage
     let (forum_mod_fingerprints, _owner_fingerprint) = app_state
@@ -1225,15 +1325,15 @@ pub async fn board_view_page(
 
     // Get user's signing keys to check if they're a forum moderator
     let signing_keys = get_signing_keys();
-    let user_fingerprints: Vec<String> = signing_keys
+    let user_fingerprints: Vec<&str> = signing_keys
         .iter()
-        .filter_map(|k| get_key_fingerprint(&k.key_id))
+        .map(|k| k.fingerprint.as_str())
         .collect();
 
     // Check if user is a forum-level moderator (can manage board moderators) - exact match required
     let is_forum_moderator = forum_mod_fingerprints
         .iter()
-        .any(|mod_fp| user_fingerprints.iter().any(|fp| fp == mod_fp));
+        .any(|mod_fp| user_fingerprints.iter().any(|fp| *fp == mod_fp));
 
     // Get effective board name/description (after applying any edits)
     let (board_name, board_description) =
@@ -1246,6 +1346,10 @@ pub async fn board_view_page(
         &forum_metadata.name,
         &forum_metadata.description,
     );
+
+    // Pagination: prev_cursor comes from query param, current_cursor is what we used
+    let prev_cursor = pagination.prev.clone();
+    let current_cursor = pagination.cursor.clone();
 
     let template = BoardViewTemplate {
         active_page: "forum".to_string(),
@@ -1264,6 +1368,11 @@ pub async fn board_view_page(
         error: None,
         has_result: false,
         has_error: false,
+        prev_cursor,
+        next_cursor,
+        current_cursor,
+        total_threads,
+        has_more,
     };
 
     Ok(Html(template.to_string()))
@@ -1367,6 +1476,7 @@ pub async fn thread_view_page(
     State(app_state): State<AppState>,
     session: Session,
     Path((forum_hash, thread_hash)): Path<(String, String)>,
+    Query(pagination): Query<PaginationQuery>,
 ) -> Result<Html<String>, StatusCode> {
     // Forum data is synced by background polling task - read from local storage
 
@@ -1423,28 +1533,59 @@ pub async fn thread_view_page(
         }
     };
 
-    // Load posts from local storage (oldest first for chronological reading)
+    // Load posts with pagination (oldest first for chronological reading)
     let hidden_posts = app_state
         .forum_persistence
         .get_hidden_posts(&forum_content_hash)
         .unwrap_or_default();
 
-    let posts = app_state
+    let cursor = pagination.get_cursor();
+    let limit = pagination.get_limit();
+
+    let paginated_result = app_state
+        .forum_persistence
+        .get_posts_paginated(
+            &forum_content_hash,
+            &thread_content_hash,
+            cursor.as_ref(),
+            limit + 1,
+        )
+        .unwrap_or_else(|_| pqpgp::forum::PaginatedResult {
+            items: Vec::new(),
+            next_cursor: None,
+            total_count: Some(0),
+        });
+
+    // We also need all posts for quote resolution (not just current page)
+    // For performance, we could cache this or use a different approach
+    let all_posts = app_state
         .forum_persistence
         .get_posts(&forum_content_hash, &thread_content_hash)
         .unwrap_or_default();
 
-    // Build post display info with quote resolution
-    let post_displays: Vec<PostDisplayInfo> = posts
-        .iter()
+    // Filter hidden posts and apply limit
+    let filtered_posts: Vec<_> = paginated_result
+        .items
+        .into_iter()
         .filter(|p| !hidden_posts.contains(p.hash()))
+        .collect();
+
+    let has_more = filtered_posts.len() > limit;
+
+    // Build post display info with quote resolution
+    let post_displays: Vec<PostDisplayInfo> = filtered_posts
+        .into_iter()
+        .take(limit)
         .map(|p| {
-            // Try to resolve quote
+            // Try to resolve quote from all posts
             let quote_body = p.quote_hash().and_then(|qh| {
-                posts.iter().find(|other| other.hash() == qh).map(|other| {
-                    let preview: String = other.body().chars().take(200).collect();
-                    preview + if other.body().len() > 200 { "..." } else { "" }
-                })
+                all_posts
+                    .iter()
+                    .find(|other| other.hash() == qh)
+                    .map(|other| {
+                        let preview: String = other.body().chars().take(200).collect();
+                        preview + if other.body().len() > 200 { "..." } else { "" }
+                    })
             });
 
             PostDisplayInfo {
@@ -1457,6 +1598,14 @@ pub async fn thread_view_page(
         })
         .collect();
 
+    let next_cursor = if has_more {
+        paginated_result.next_cursor.as_ref().map(|c| c.encode())
+    } else {
+        None
+    };
+
+    let total_posts = paginated_result.total_count.unwrap_or(0);
+
     // Load forum moderators from local storage
     let (forum_mod_fingerprints, _owner_fingerprint) = app_state
         .forum_persistence
@@ -1465,15 +1614,15 @@ pub async fn thread_view_page(
 
     // Get user's signing keys to check if they're a moderator
     let signing_keys = get_signing_keys();
-    let user_fingerprints: Vec<String> = signing_keys
+    let user_fingerprints: Vec<&str> = signing_keys
         .iter()
-        .filter_map(|k| get_key_fingerprint(&k.key_id))
+        .map(|k| k.fingerprint.as_str())
         .collect();
 
     // Check if user is a moderator (owner or regular mod) - exact match required
     let is_moderator = forum_mod_fingerprints
         .iter()
-        .any(|mod_fp| user_fingerprints.iter().any(|fp| fp == mod_fp));
+        .any(|mod_fp| user_fingerprints.iter().any(|fp| *fp == mod_fp));
 
     // Load all boards for the move thread dropdown
     let all_boards_data = app_state
@@ -1504,6 +1653,10 @@ pub async fn thread_view_page(
         &forum_metadata.description,
     );
 
+    // Pagination: prev_cursor comes from query param, current_cursor is what we used
+    let prev_cursor = pagination.prev.clone();
+    let current_cursor = pagination.cursor.clone();
+
     let template = ThreadViewTemplate {
         active_page: "forum".to_string(),
         csrf_token,
@@ -1524,6 +1677,11 @@ pub async fn thread_view_page(
         error: None,
         has_result: false,
         has_error: false,
+        prev_cursor,
+        next_cursor,
+        current_cursor,
+        total_posts,
+        has_more,
     };
 
     Ok(Html(template.to_string()))

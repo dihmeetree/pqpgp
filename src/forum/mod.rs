@@ -83,7 +83,7 @@ pub use sealed_message::{
     SealedPrivateMessage, SealedPrivateMessageContent, X3DHData,
 };
 pub use state::{ForumRelayState, ForumState};
-pub use storage::{ForumMetadata, ForumStorage};
+pub use storage::{Cursor, ForumMetadata, ForumStorage, PaginatedResult, DEFAULT_PAGE_SIZE};
 pub use sync::{
     ExportForumRequest, ExportForumResponse, FetchNodesRequest, FetchNodesResponse, SerializedNode,
     SubmitNodeRequest, SubmitNodeResponse, SyncRequest, SyncResponse,

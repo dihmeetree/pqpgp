@@ -529,8 +529,26 @@ pqpgp_forum_data/
     ├── Column: nodes            # {forum_hash}:{node_hash} → DagNode
     ├── Column: forums           # {forum_hash} → ForumMetadata
     ├── Column: heads            # {forum_hash} → Vec<ContentHash>
-    └── Column: meta             # forum_list → [forum_hashes]
+    ├── Column: meta             # forum_list → [forum_hashes]
+    ├── Column: idx_forums       # Sorted index for forum listing
+    ├── Column: idx_boards       # Sorted index for board listing
+    ├── Column: idx_threads      # Sorted index for thread listing
+    ├── Column: idx_posts        # Sorted index for post listing
+    └── Column: idx_post_counts  # Reply count cache
 ```
+
+**Query Indexes:**
+
+Indexes embed timestamps in keys for efficient sorted iteration and cursor-based pagination:
+
+| Index           | Key Structure                                    | Sort Order   |
+| --------------- | ------------------------------------------------ | ------------ |
+| `idx_forums`    | `inverted_ts + forum` (72 bytes)                 | Newest first |
+| `idx_boards`    | `forum + inverted_ts + board` (136 bytes)        | Newest first |
+| `idx_threads`   | `forum + board + inverted_ts + thread` (200 bytes) | Newest first |
+| `idx_posts`     | `forum + thread + timestamp + post` (200 bytes)  | Oldest first |
+
+This enables O(page_size) queries with early termination instead of O(all_nodes), reducing page loads from 300ms to 2-10ms.
 
 **Background Sync:**
 

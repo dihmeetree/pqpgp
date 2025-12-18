@@ -23,7 +23,6 @@
             <tr>
                 <th>Forum Name</th>
                 <th>Description</th>
-                <th>Nodes</th>
                 <th>Created</th>
                 <th>Actions</th>
             </tr>
@@ -33,7 +32,6 @@
             <tr>
                 <td><strong>{{ forum.name }}</strong></td>
                 <td>{{ forum.description }}</td>
-                <td>{{ forum.node_count }}</td>
                 <td>{{ forum.created_at_display }}</td>
                 <td>
                     <a href="/forum/{{ forum.hash }}" class="btn btn-small">View Boards</a>
@@ -42,6 +40,24 @@
             {% endfor %}
         </tbody>
     </table>
+
+    <div style="margin-top: 1em; display: flex; justify-content: space-between; align-items: center;">
+        <span style="color: #718096; font-size: 0.9em;">Showing {{ forums.len() }} of {{ total_forums }} forums</span>
+        <div>
+            {% if let Some(prev) = prev_cursor %}
+            <a href="/forum?cursor={{ prev }}" class="btn btn-small">&larr; Previous</a>
+            {% else %}
+            {% if current_cursor.is_some() %}
+            <a href="/forum" class="btn btn-small">&larr; Previous</a>
+            {% endif %}
+            {% endif %}
+            {% if has_more %}
+            {% if let Some(cursor) = next_cursor %}
+            <a href="/forum?cursor={{ cursor }}&prev={{ current_cursor.as_deref().unwrap_or_default() }}" class="btn btn-small">Next &rarr;</a>
+            {% endif %}
+            {% endif %}
+        </div>
+    </div>
     {% endif %}
 </div>
 

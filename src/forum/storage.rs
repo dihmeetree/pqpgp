@@ -59,6 +59,16 @@ const CF_HEADS: &str = "heads";
 const CF_META: &str = "meta";
 const CF_PRIVATE: &str = "private";
 
+/// Index column families for fast queries.
+/// These store lightweight references to enable O(1) lookups instead of full scans.
+const CF_IDX_FORUMS: &str = "idx_forums"; // inverted_timestamp + forum_hash -> () (sorted by time desc)
+const CF_IDX_BOARDS: &str = "idx_boards"; // forum_hash + inverted_timestamp + board_hash -> ()
+const CF_IDX_THREADS: &str = "idx_threads"; // forum_hash + board_hash + inverted_timestamp + thread_hash -> ()
+const CF_IDX_POSTS: &str = "idx_posts"; // forum_hash + thread_hash + timestamp + post_hash -> ()
+const CF_IDX_POST_COUNTS: &str = "idx_post_counts"; // forum_hash + thread_hash -> u64 count
+const CF_IDX_MOD_ACTIONS: &str = "idx_mod_actions"; // forum_hash + mod_action_hash -> timestamp
+const CF_IDX_EDITS: &str = "idx_edits"; // forum_hash + target_hash + edit_hash -> timestamp
+
 /// Key for the forum list in the meta column family.
 const META_FORUM_LIST: &[u8] = b"forum_list";
 
@@ -87,6 +97,58 @@ pub struct ForumMetadata {
     pub owner_identity: Vec<u8>,
 }
 
+/// Default page size for paginated queries.
+pub const DEFAULT_PAGE_SIZE: usize = 20;
+
+/// Cursor for pagination, encoding the position in a sorted list.
+///
+/// Uses timestamp + hash to ensure stable pagination even with duplicate timestamps.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cursor {
+    /// Timestamp of the last item in the previous page.
+    pub timestamp: u64,
+    /// Hash of the last item (for tie-breaking when timestamps are equal).
+    pub hash: ContentHash,
+}
+
+impl Cursor {
+    /// Creates a new cursor from timestamp and hash.
+    pub fn new(timestamp: u64, hash: ContentHash) -> Self {
+        Self { timestamp, hash }
+    }
+
+    /// Encodes the cursor as a base64 string for URL-safe transport.
+    pub fn encode(&self) -> String {
+        let bytes = bincode::serialize(self).unwrap_or_default();
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, &bytes)
+    }
+
+    /// Decodes a cursor from a base64 string.
+    pub fn decode(s: &str) -> Option<Self> {
+        let bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, s).ok()?;
+        bincode::deserialize(&bytes).ok()
+    }
+}
+
+/// Result of a paginated query.
+#[derive(Debug, Clone)]
+pub struct PaginatedResult<T> {
+    /// The items in this page.
+    pub items: Vec<T>,
+    /// Cursor for the next page, if there are more items.
+    pub next_cursor: Option<Cursor>,
+    /// Total count of items (if available, for display purposes).
+    pub total_count: Option<usize>,
+}
+
+impl<T> PaginatedResult<T> {
+    /// Returns true if there are more pages after this one.
+    pub fn has_more(&self) -> bool {
+        self.next_cursor.is_some()
+    }
+}
+
 /// RocksDB-backed forum storage.
 #[derive(Debug)]
 pub struct ForumStorage {
@@ -100,20 +162,265 @@ impl ForumStorage {
     }
 
     /// Creates a new storage manager with a custom data directory.
+    ///
+    /// Automatically rebuilds indexes if they are missing (migration from older versions).
     pub fn new(data_dir: impl AsRef<Path>) -> Result<Self> {
         let db_path = data_dir.as_ref().join(DB_DIR);
         let config = RocksDbConfig::default();
-        let column_families = &[CF_NODES, CF_FORUMS, CF_HEADS, CF_META, CF_PRIVATE];
+        let column_families = &[
+            CF_NODES,
+            CF_FORUMS,
+            CF_HEADS,
+            CF_META,
+            CF_PRIVATE,
+            // Index column families for fast queries
+            CF_IDX_FORUMS,
+            CF_IDX_BOARDS,
+            CF_IDX_THREADS,
+            CF_IDX_POSTS,
+            CF_IDX_POST_COUNTS,
+            CF_IDX_MOD_ACTIONS,
+            CF_IDX_EDITS,
+        ];
 
         let db = RocksDbHandle::open(&db_path, &config, column_families)?;
         info!("Opened forum RocksDB at {:?}", db_path);
 
-        Ok(Self { db })
+        let storage = Self { db };
+
+        // Check if indexes need to be rebuilt (migration from older versions)
+        storage.ensure_indexes_exist()?;
+
+        Ok(storage)
+    }
+
+    /// Checks if indexes exist and rebuilds them if missing.
+    ///
+    /// This handles migration from older database versions that didn't have indexes.
+    fn ensure_indexes_exist(&self) -> Result<()> {
+        let forums = self.list_forums()?;
+        info!("Index check: found {} forums in list", forums.len());
+
+        if forums.is_empty() {
+            info!("No forums found, skipping index check");
+            return Ok(()); // No forums, nothing to index
+        }
+
+        // Check if we have the forum index (72 bytes: inverted_timestamp 8 + forum_hash 64)
+        let mut has_forum_index = false;
+        self.db.prefix_iterate(CF_IDX_FORUMS, &[], |key, _| {
+            if key.len() == 72 {
+                has_forum_index = true;
+                return false; // Stop after finding one valid entry
+            }
+            true
+        })?;
+
+        // Check if we have any VALID index entries for the first forum
+        // New format: 136 bytes (forum_hash 64 + inverted_timestamp 8 + board_hash 64)
+        // Old format: 128 bytes (forum_hash 64 + board_hash 64)
+        let first_forum = &forums[0];
+        let mut has_new_format_indexes = false;
+        let mut has_old_format_indexes = false;
+        let mut has_mod_action_indexes = false;
+
+        self.db
+            .prefix_iterate(CF_IDX_BOARDS, first_forum.as_bytes(), |key, _| {
+                if key.len() == 136 {
+                    has_new_format_indexes = true;
+                    return false; // Stop after finding one valid entry
+                } else if key.len() == 128 {
+                    has_old_format_indexes = true;
+                    return false;
+                }
+                true // Continue looking
+            })?;
+
+        // Also check mod action index (added later, may be missing)
+        self.db
+            .prefix_iterate(CF_IDX_MOD_ACTIONS, first_forum.as_bytes(), |key, _| {
+                if key.len() == 128 {
+                    has_mod_action_indexes = true;
+                    return false;
+                }
+                true
+            })?;
+
+        info!(
+            "Index check for forum {}: forum_idx={}, new_format={}, old_format={}, mod_actions={}",
+            first_forum.short(),
+            has_forum_index,
+            has_new_format_indexes,
+            has_old_format_indexes,
+            has_mod_action_indexes
+        );
+
+        // Need to rebuild if:
+        // 1. Forum index is missing
+        // 2. No board indexes at all (but forum has boards)
+        // 3. Old format indexes exist (need to migrate to new sorted format)
+        // 4. Mod action indexes are missing
+        let needs_rebuild = if !has_forum_index {
+            info!("Forum index missing, will rebuild");
+            true
+        } else if has_new_format_indexes && has_mod_action_indexes {
+            false // Already have new format with all indexes
+        } else if has_old_format_indexes {
+            info!("Old index format detected, rebuilding for sorted pagination...");
+            true
+        } else if !has_new_format_indexes {
+            // Check if this forum has any boards that should be indexed
+            let nodes = self.load_forum_nodes(first_forum)?;
+            let board_count = nodes
+                .iter()
+                .filter(|n| n.as_board_genesis().is_some())
+                .count();
+            info!(
+                "Forum {} has {} nodes, {} boards",
+                first_forum.short(),
+                nodes.len(),
+                board_count
+            );
+            board_count > 0
+        } else if !has_mod_action_indexes {
+            info!("Mod action index missing, will rebuild");
+            true
+        } else {
+            false
+        };
+
+        if needs_rebuild {
+            info!("Indexes missing or incomplete, rebuilding for faster queries...");
+            self.rebuild_all_indexes()?;
+        }
+
+        Ok(())
     }
 
     /// Creates a composite key for node storage.
     fn node_key(forum_hash: &ContentHash, node_hash: &ContentHash) -> Vec<u8> {
         composite_key(forum_hash.as_bytes(), node_hash.as_bytes())
+    }
+
+    /// Inverts a timestamp so newer timestamps sort first in byte order.
+    ///
+    /// RocksDB sorts keys in ascending byte order, so we use `u64::MAX - timestamp`
+    /// to make newer items appear first when iterating.
+    fn invert_timestamp(timestamp: u64) -> [u8; 8] {
+        (u64::MAX - timestamp).to_be_bytes()
+    }
+
+    /// Creates an index key for forum lookup: inverted_timestamp + forum_hash (72 bytes).
+    ///
+    /// The inverted timestamp ensures newest forums come first in iteration order.
+    fn forum_index_key(timestamp: u64, forum_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(72);
+        key.extend_from_slice(&Self::invert_timestamp(timestamp));
+        key.extend_from_slice(forum_hash.as_bytes());
+        key
+    }
+
+    /// Creates an index key for board lookup: forum_hash + inverted_timestamp + board_hash (136 bytes).
+    ///
+    /// The inverted timestamp ensures newest boards come first in iteration order.
+    fn board_index_key(
+        forum_hash: &ContentHash,
+        timestamp: u64,
+        board_hash: &ContentHash,
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(136);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(&Self::invert_timestamp(timestamp));
+        key.extend_from_slice(board_hash.as_bytes());
+        key
+    }
+
+    /// Creates an index key for thread lookup: forum_hash + board_hash + inverted_timestamp + thread_hash (200 bytes).
+    ///
+    /// The inverted timestamp ensures newest threads come first in iteration order.
+    fn thread_index_key(
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+        timestamp: u64,
+        thread_hash: &ContentHash,
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(200);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(board_hash.as_bytes());
+        key.extend_from_slice(&Self::invert_timestamp(timestamp));
+        key.extend_from_slice(thread_hash.as_bytes());
+        key
+    }
+
+    /// Creates a prefix key for threads in a board: forum_hash + board_hash (128 bytes).
+    fn thread_index_prefix(forum_hash: &ContentHash, board_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(board_hash.as_bytes());
+        key
+    }
+
+    /// Creates an index key for post lookup: forum_hash + thread_hash + timestamp + post_hash (200 bytes).
+    ///
+    /// Unlike boards/threads, posts use NON-inverted timestamps so oldest posts
+    /// come first (chronological reading order).
+    fn post_index_key(
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+        timestamp: u64,
+        post_hash: &ContentHash,
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(200);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(thread_hash.as_bytes());
+        key.extend_from_slice(&timestamp.to_be_bytes()); // NOT inverted - oldest first
+        key.extend_from_slice(post_hash.as_bytes());
+        key
+    }
+
+    /// Creates a prefix key for posts in a thread: forum_hash + thread_hash (128 bytes).
+    fn post_index_prefix(forum_hash: &ContentHash, thread_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(thread_hash.as_bytes());
+        key
+    }
+
+    /// Creates a key for post count cache: forum_hash + thread_hash (128 bytes).
+    fn post_count_key(forum_hash: &ContentHash, thread_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(thread_hash.as_bytes());
+        key
+    }
+
+    /// Creates an index key for mod action lookup: forum_hash + mod_action_hash (128 bytes).
+    fn mod_action_index_key(forum_hash: &ContentHash, action_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(action_hash.as_bytes());
+        key
+    }
+
+    /// Creates an index key for edit lookup: forum_hash + target_hash + edit_hash (192 bytes).
+    fn edit_index_key(
+        forum_hash: &ContentHash,
+        target_hash: &ContentHash,
+        edit_hash: &ContentHash,
+    ) -> Vec<u8> {
+        let mut key = Vec::with_capacity(192);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(target_hash.as_bytes());
+        key.extend_from_slice(edit_hash.as_bytes());
+        key
+    }
+
+    /// Creates a prefix key for edits of a target: forum_hash + target_hash (128 bytes).
+    fn edit_index_prefix(forum_hash: &ContentHash, target_hash: &ContentHash) -> Vec<u8> {
+        let mut key = Vec::with_capacity(128);
+        key.extend_from_slice(forum_hash.as_bytes());
+        key.extend_from_slice(target_hash.as_bytes());
+        key
     }
 
     // ========================================================================
@@ -129,10 +436,97 @@ impl ForumStorage {
     }
 
     /// Stores a node for a specific forum.
+    ///
+    /// Also updates indexes for fast queries.
     pub fn store_node_for_forum(&self, forum_hash: &ContentHash, node: &DagNode) -> Result<()> {
         let key = Self::node_key(forum_hash, node.hash());
         let value = node.to_bytes()?;
-        self.db.put_raw(CF_NODES, &key, &value)
+        self.db.put_raw(CF_NODES, &key, &value)?;
+
+        // Update indexes based on node type
+        self.update_indexes_for_node(forum_hash, node)?;
+
+        Ok(())
+    }
+
+    /// Updates indexes when a node is stored.
+    fn update_indexes_for_node(&self, forum_hash: &ContentHash, node: &DagNode) -> Result<()> {
+        match node {
+            DagNode::BoardGenesis(board) => {
+                // Index: forum + inverted_timestamp + board_hash (sorted by time desc)
+                let idx_key = Self::board_index_key(forum_hash, board.created_at(), board.hash());
+                // Value stores the board hash for easy retrieval
+                self.db
+                    .put_raw(CF_IDX_BOARDS, &idx_key, board.hash().as_bytes())?;
+            }
+            DagNode::ThreadRoot(thread) => {
+                // Index: forum + board + inverted_timestamp + thread_hash (sorted by time desc)
+                let idx_key = Self::thread_index_key(
+                    forum_hash,
+                    thread.board_hash(),
+                    thread.created_at(),
+                    thread.hash(),
+                );
+                // Value stores the thread hash for easy retrieval
+                self.db
+                    .put_raw(CF_IDX_THREADS, &idx_key, thread.hash().as_bytes())?;
+            }
+            DagNode::Post(post) => {
+                // Index: forum + thread + inverted_timestamp + post_hash (sorted by time desc)
+                let idx_key = Self::post_index_key(
+                    forum_hash,
+                    post.thread_hash(),
+                    post.created_at(),
+                    post.hash(),
+                );
+                // Value stores the post hash for easy retrieval
+                self.db
+                    .put_raw(CF_IDX_POSTS, &idx_key, post.hash().as_bytes())?;
+
+                // Update post count cache
+                self.increment_post_count(forum_hash, post.thread_hash())?;
+            }
+            DagNode::ModAction(action) => {
+                // Index: forum -> mod action
+                let idx_key = Self::mod_action_index_key(forum_hash, action.hash());
+                self.db.put_raw(
+                    CF_IDX_MOD_ACTIONS,
+                    &idx_key,
+                    &action.created_at().to_be_bytes(),
+                )?;
+            }
+            DagNode::Edit(edit) => {
+                // Index: forum + target -> edit
+                let idx_key = Self::edit_index_key(forum_hash, edit.target_hash(), edit.hash());
+                self.db
+                    .put_raw(CF_IDX_EDITS, &idx_key, &edit.created_at().to_be_bytes())?;
+            }
+            // Other node types don't need indexes for the main queries
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Increments the cached post count for a thread.
+    fn increment_post_count(
+        &self,
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+    ) -> Result<()> {
+        let key = Self::post_count_key(forum_hash, thread_hash);
+        let current: u64 = self
+            .db
+            .get_raw(CF_IDX_POST_COUNTS, &key)?
+            .map(|bytes| {
+                if bytes.len() == 8 {
+                    u64::from_be_bytes(bytes.try_into().unwrap())
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
+        self.db
+            .put_raw(CF_IDX_POST_COUNTS, &key, &(current + 1).to_be_bytes())
     }
 
     /// Gets the forum hash from a node.
@@ -237,6 +631,20 @@ impl ForumStorage {
             })
     }
 
+    /// Counts nodes for a forum without deserializing them.
+    ///
+    /// This is much faster than `load_forum_nodes().len()` since it only
+    /// iterates keys without reading or deserializing values.
+    pub fn count_forum_nodes(&self, forum_hash: &ContentHash) -> Result<usize> {
+        let mut count = 0;
+        self.db
+            .prefix_iterate(CF_NODES, forum_hash.as_bytes(), |_, _| {
+                count += 1;
+                true
+            })?;
+        Ok(count)
+    }
+
     /// Loads all nodes from all forums.
     pub fn load_all_nodes(&self) -> Result<HashMap<ContentHash, DagNode>> {
         let mut nodes = HashMap::new();
@@ -261,6 +669,12 @@ impl ForumStorage {
     ) -> Result<()> {
         self.db.put(CF_FORUMS, forum_hash.as_bytes(), metadata)?;
         self.add_forum_to_list(forum_hash)?;
+
+        // Add to forum index for efficient sorted listing
+        let idx_key = Self::forum_index_key(metadata.created_at, forum_hash);
+        self.db
+            .put_raw(CF_IDX_FORUMS, &idx_key, forum_hash.as_bytes())?;
+
         Ok(())
     }
 
@@ -316,6 +730,82 @@ impl ForumStorage {
             .map(|opt| opt.unwrap_or_default())
     }
 
+    /// Lists synced forums with pagination.
+    ///
+    /// Returns forums sorted by creation time (newest first).
+    /// Uses the forum index for efficient cursor-based pagination.
+    pub fn list_forums_paginated(
+        &self,
+        cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<PaginatedResult<(ContentHash, ForumMetadata)>> {
+        // Build the seek key for iteration
+        // Index key format: inverted_timestamp (8 bytes) + forum_hash (64 bytes) = 72 bytes
+        let seek_key = if let Some(cursor) = cursor {
+            let mut key = Vec::with_capacity(72);
+            key.extend_from_slice(&Self::invert_timestamp(cursor.timestamp));
+            key.extend_from_slice(cursor.hash.as_bytes());
+            // Increment to skip cursor item
+            let mut key_bytes: [u8; 72] = key.try_into().unwrap();
+            for i in (0..72).rev() {
+                if key_bytes[i] < 255 {
+                    key_bytes[i] += 1;
+                    break;
+                }
+                key_bytes[i] = 0;
+            }
+            key_bytes.to_vec()
+        } else {
+            Vec::new() // Start from beginning
+        };
+
+        // Count total forums
+        let mut total_count = 0;
+        self.db.prefix_iterate(CF_IDX_FORUMS, &[], |key, _| {
+            if key.len() == 72 {
+                total_count += 1;
+            }
+            true
+        })?;
+
+        // Collect only limit + 1 items starting from the cursor
+        let mut forum_hashes: Vec<ContentHash> = Vec::with_capacity(limit + 1);
+        self.db
+            .seek_iterate(CF_IDX_FORUMS, &seek_key, &[], |key, _| {
+                // Key format: inverted_timestamp (8) + forum_hash (64) = 72 bytes
+                if key.len() == 72 {
+                    let forum_hash = ContentHash::from_bytes(key[8..72].try_into().unwrap());
+                    forum_hashes.push(forum_hash);
+                }
+                forum_hashes.len() <= limit
+            })?;
+
+        let has_more = forum_hashes.len() > limit;
+        let page_hashes: Vec<_> = forum_hashes.into_iter().take(limit).collect();
+
+        // Load the actual forum metadata
+        let mut items = Vec::with_capacity(page_hashes.len());
+        for forum_hash in &page_hashes {
+            if let Some(metadata) = self.load_forum_metadata(forum_hash)? {
+                items.push((*forum_hash, metadata));
+            }
+        }
+
+        // Create cursor for next page from the last loaded forum
+        let next_cursor = if has_more && !items.is_empty() {
+            let (last_hash, last_metadata) = items.last().unwrap();
+            Some(Cursor::new(last_metadata.created_at, *last_hash))
+        } else {
+            None
+        };
+
+        Ok(PaginatedResult {
+            items,
+            next_cursor,
+            total_count: Some(total_count),
+        })
+    }
+
     /// Adds a forum to the list of synced forums.
     fn add_forum_to_list(&self, forum_hash: &ContentHash) -> Result<()> {
         let mut forums = self.list_forums()?;
@@ -330,6 +820,18 @@ impl ForumStorage {
     pub fn remove_forum(&self, forum_hash: &ContentHash) -> Result<()> {
         // Delete all nodes for this forum
         self.db.prefix_delete(CF_NODES, forum_hash.as_bytes())?;
+
+        // Delete all indexes for this forum
+        self.db
+            .prefix_delete(CF_IDX_BOARDS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_THREADS, forum_hash.as_bytes())?;
+        self.db.prefix_delete(CF_IDX_POSTS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_POST_COUNTS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_MOD_ACTIONS, forum_hash.as_bytes())?;
+        self.db.prefix_delete(CF_IDX_EDITS, forum_hash.as_bytes())?;
 
         // Delete forum metadata
         self.db.delete(CF_FORUMS, forum_hash.as_bytes())?;
@@ -350,86 +852,585 @@ impl ForumStorage {
         Ok(())
     }
 
+    /// Rebuilds all indexes for a forum from existing nodes.
+    ///
+    /// This is useful for migrating existing databases or recovering from corruption.
+    pub fn rebuild_indexes(&self, forum_hash: &ContentHash) -> Result<()> {
+        info!("Rebuilding indexes for forum {}...", forum_hash.short());
+
+        // Clear existing indexes for this forum
+        self.db
+            .prefix_delete(CF_IDX_BOARDS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_THREADS, forum_hash.as_bytes())?;
+        self.db.prefix_delete(CF_IDX_POSTS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_POST_COUNTS, forum_hash.as_bytes())?;
+        self.db
+            .prefix_delete(CF_IDX_MOD_ACTIONS, forum_hash.as_bytes())?;
+        self.db.prefix_delete(CF_IDX_EDITS, forum_hash.as_bytes())?;
+
+        // Load all nodes and rebuild indexes
+        let nodes = self.load_forum_nodes(forum_hash)?;
+        let mut board_count = 0;
+        let mut thread_count = 0;
+        let mut post_count = 0;
+        let mut mod_action_count = 0;
+        let mut edit_count = 0;
+
+        for node in &nodes {
+            match node {
+                DagNode::BoardGenesis(board) => {
+                    let idx_key =
+                        Self::board_index_key(forum_hash, board.created_at(), board.hash());
+                    self.db
+                        .put_raw(CF_IDX_BOARDS, &idx_key, board.hash().as_bytes())?;
+                    board_count += 1;
+                }
+                DagNode::ThreadRoot(thread) => {
+                    let idx_key = Self::thread_index_key(
+                        forum_hash,
+                        thread.board_hash(),
+                        thread.created_at(),
+                        thread.hash(),
+                    );
+                    self.db
+                        .put_raw(CF_IDX_THREADS, &idx_key, thread.hash().as_bytes())?;
+                    thread_count += 1;
+                }
+                DagNode::Post(post) => {
+                    let idx_key = Self::post_index_key(
+                        forum_hash,
+                        post.thread_hash(),
+                        post.created_at(),
+                        post.hash(),
+                    );
+                    self.db
+                        .put_raw(CF_IDX_POSTS, &idx_key, post.hash().as_bytes())?;
+                    post_count += 1;
+                }
+                DagNode::ModAction(action) => {
+                    let idx_key = Self::mod_action_index_key(forum_hash, action.hash());
+                    self.db.put_raw(
+                        CF_IDX_MOD_ACTIONS,
+                        &idx_key,
+                        &action.created_at().to_be_bytes(),
+                    )?;
+                    mod_action_count += 1;
+                }
+                DagNode::Edit(edit) => {
+                    let idx_key = Self::edit_index_key(forum_hash, edit.target_hash(), edit.hash());
+                    self.db
+                        .put_raw(CF_IDX_EDITS, &idx_key, &edit.created_at().to_be_bytes())?;
+                    edit_count += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // Rebuild post count caches
+        let mut post_counts: HashMap<ContentHash, u64> = HashMap::new();
+        for node in &nodes {
+            if let DagNode::Post(post) = node {
+                *post_counts.entry(*post.thread_hash()).or_insert(0) += 1;
+            }
+        }
+
+        for (thread_hash, count) in post_counts {
+            let key = Self::post_count_key(forum_hash, &thread_hash);
+            self.db
+                .put_raw(CF_IDX_POST_COUNTS, &key, &count.to_be_bytes())?;
+        }
+
+        info!(
+            "Rebuilt indexes: {} boards, {} threads, {} posts, {} mod actions, {} edits",
+            board_count, thread_count, post_count, mod_action_count, edit_count
+        );
+        Ok(())
+    }
+
+    /// Rebuilds indexes for all forums.
+    pub fn rebuild_all_indexes(&self) -> Result<()> {
+        let forums = self.list_forums()?;
+        info!("Rebuilding indexes for {} forums...", forums.len());
+
+        // Rebuild the forum index (global, not per-forum)
+        self.rebuild_forum_index()?;
+
+        // Rebuild per-forum indexes
+        for forum_hash in forums {
+            self.rebuild_indexes(&forum_hash)?;
+        }
+
+        info!("All indexes rebuilt");
+        Ok(())
+    }
+
+    /// Rebuilds the global forum index for sorted listing.
+    fn rebuild_forum_index(&self) -> Result<()> {
+        info!("Rebuilding forum index...");
+
+        // Clear existing forum index
+        // Since we can't do prefix_delete with empty prefix, iterate and delete each key
+        let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
+        self.db.prefix_iterate(CF_IDX_FORUMS, &[], |key, _| {
+            keys_to_delete.push(key.to_vec());
+            true
+        })?;
+        for key in keys_to_delete {
+            self.db.delete(CF_IDX_FORUMS, &key)?;
+        }
+
+        // Rebuild index from forum metadata
+        let forums = self.list_forums()?;
+        let mut count = 0;
+        for forum_hash in &forums {
+            if let Some(metadata) = self.load_forum_metadata(forum_hash)? {
+                let idx_key = Self::forum_index_key(metadata.created_at, forum_hash);
+                self.db
+                    .put_raw(CF_IDX_FORUMS, &idx_key, forum_hash.as_bytes())?;
+                count += 1;
+            }
+        }
+
+        info!("Rebuilt forum index: {} forums", count);
+        Ok(())
+    }
+
     // ========================================================================
-    // Query Methods for UI Display
+    // Query Methods for UI Display (Indexed - Fast)
     // ========================================================================
 
     /// Gets all boards in a forum, sorted by creation time (newest first).
+    ///
+    /// Uses the board index for O(boards) instead of O(all_nodes).
     pub fn get_boards(&self, forum_hash: &ContentHash) -> Result<Vec<BoardGenesis>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let mut boards: Vec<BoardGenesis> = nodes
-            .into_iter()
-            .filter_map(|n| n.as_board_genesis().cloned())
-            .collect();
+        // Collect board hashes from the index (already sorted by inverted timestamp)
+        let mut board_hashes: Vec<ContentHash> = Vec::new();
+        self.db
+            .prefix_iterate(CF_IDX_BOARDS, forum_hash.as_bytes(), |key, _value| {
+                // Key is forum_hash (64 bytes) + inverted_timestamp (8 bytes) + board_hash (64 bytes) = 136 bytes
+                if key.len() == 136 {
+                    let board_hash = ContentHash::from_bytes(key[72..136].try_into().unwrap());
+                    board_hashes.push(board_hash);
+                }
+                true // continue iteration
+            })?;
 
-        // Sort by created_at descending (newest first)
-        boards.sort_by_key(|b| std::cmp::Reverse(b.created_at()));
+        // Load the actual board nodes (already in timestamp-descending order from index)
+        let mut boards = Vec::with_capacity(board_hashes.len());
+        for board_hash in board_hashes {
+            if let Some(board) = self.get_board(forum_hash, &board_hash)? {
+                boards.push(board);
+            }
+        }
+
         Ok(boards)
     }
 
     /// Gets all threads in a board, sorted by creation time (newest first).
     ///
-    /// This accounts for moved threads: threads that were originally in another board
-    /// but have been moved to this board will be included, and threads that were
-    /// originally in this board but have been moved elsewhere will be excluded.
+    /// Uses the thread index for O(threads_in_board) instead of O(all_nodes).
+    /// This accounts for moved threads.
     pub fn get_threads(
         &self,
         forum_hash: &ContentHash,
         board_hash: &ContentHash,
     ) -> Result<Vec<ThreadRoot>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
         // Get the map of moved threads (thread_hash -> current_board_hash)
         let moved_threads = self.get_moved_threads(forum_hash)?;
 
-        let mut threads: Vec<ThreadRoot> = nodes
-            .into_iter()
-            .filter_map(|n| n.as_thread_root().cloned())
-            .filter(|t| {
-                // Check if thread has been moved
-                let current_board = moved_threads
-                    .get(t.hash())
-                    .unwrap_or_else(|| t.board_hash());
-                current_board == board_hash
-            })
-            .collect();
+        // Collect thread hashes from the index (already sorted by inverted timestamp)
+        let prefix = Self::thread_index_prefix(forum_hash, board_hash);
+        let mut thread_hashes: Vec<ContentHash> = Vec::new();
+        self.db
+            .prefix_iterate(CF_IDX_THREADS, &prefix, |key, _value| {
+                // Key is forum_hash (64) + board_hash (64) + inverted_timestamp (8) + thread_hash (64) = 200 bytes
+                if key.len() == 200 {
+                    let thread_hash = ContentHash::from_bytes(key[136..200].try_into().unwrap());
+                    thread_hashes.push(thread_hash);
+                }
+                true // continue iteration
+            })?;
 
-        // Sort by created_at descending (newest first)
+        // Load threads, filtering out those that have been moved away
+        let mut threads = Vec::with_capacity(thread_hashes.len());
+        for thread_hash in thread_hashes {
+            // Skip threads that have been moved to another board
+            if let Some(moved_to) = moved_threads.get(&thread_hash) {
+                if moved_to != board_hash {
+                    continue;
+                }
+            }
+
+            if let Some(thread) = self.get_thread(forum_hash, &thread_hash)? {
+                threads.push(thread);
+            }
+        }
+
+        // Also include threads that were moved TO this board from elsewhere
+        for (thread_hash, current_board) in &moved_threads {
+            if current_board == board_hash {
+                // Check if we already have this thread (was originally in this board)
+                if !threads.iter().any(|t| t.hash() == thread_hash) {
+                    if let Some(thread) = self.get_thread(forum_hash, thread_hash)? {
+                        threads.push(thread);
+                    }
+                }
+            }
+        }
+
+        // Re-sort after adding moved threads (index order may be disrupted by moved threads)
         threads.sort_by_key(|t| std::cmp::Reverse(t.created_at()));
         Ok(threads)
     }
 
     /// Gets all posts in a thread, sorted by creation time (oldest first for chronological reading).
+    ///
+    /// Uses the post index for O(posts_in_thread) instead of O(all_nodes).
     pub fn get_posts(
         &self,
         forum_hash: &ContentHash,
         thread_hash: &ContentHash,
     ) -> Result<Vec<Post>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let mut posts: Vec<Post> = nodes
-            .into_iter()
-            .filter_map(|n| n.as_post().cloned())
-            .filter(|p| p.thread_hash() == thread_hash)
-            .collect();
+        // Collect post hashes from the index (already sorted by timestamp ascending - oldest first)
+        let prefix = Self::post_index_prefix(forum_hash, thread_hash);
+        let mut post_hashes: Vec<ContentHash> = Vec::new();
+        self.db
+            .prefix_iterate(CF_IDX_POSTS, &prefix, |key, _value| {
+                // Key is forum_hash (64) + thread_hash (64) + timestamp (8) + post_hash (64) = 200 bytes
+                if key.len() == 200 {
+                    let post_hash = ContentHash::from_bytes(key[136..200].try_into().unwrap());
+                    post_hashes.push(post_hash);
+                }
+                true // continue iteration
+            })?;
 
-        // Sort by created_at ascending (oldest first for chronological reading)
-        posts.sort_by_key(|p| p.created_at());
+        // Load the actual post nodes (already in chronological order from index)
+        let mut posts = Vec::with_capacity(post_hashes.len());
+        for post_hash in post_hashes {
+            if let Some(post) = self.load_post(forum_hash, &post_hash)? {
+                posts.push(post);
+            }
+        }
+
         Ok(posts)
     }
 
     /// Gets the post count for a thread.
+    ///
+    /// Uses cached count for O(1) instead of O(all_nodes).
     pub fn get_post_count(
         &self,
         forum_hash: &ContentHash,
         thread_hash: &ContentHash,
     ) -> Result<usize> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let count = nodes
-            .iter()
-            .filter_map(|n| n.as_post())
-            .filter(|p| p.thread_hash() == thread_hash)
-            .count();
+        let key = Self::post_count_key(forum_hash, thread_hash);
+        let count = self
+            .db
+            .get_raw(CF_IDX_POST_COUNTS, &key)?
+            .map(|bytes| {
+                if bytes.len() == 8 {
+                    u64::from_be_bytes(bytes.try_into().unwrap()) as usize
+                } else {
+                    0
+                }
+            })
+            .unwrap_or(0);
         Ok(count)
+    }
+
+    // ========================================================================
+    // Paginated Query Methods
+    // ========================================================================
+
+    /// Gets boards in a forum with cursor-based pagination.
+    ///
+    /// Boards are sorted by creation time (newest first).
+    /// Pass `None` for cursor to get the first page.
+    ///
+    /// This method is efficient: it uses sorted indexes and stops iteration
+    /// once enough items have been collected.
+    pub fn get_boards_paginated(
+        &self,
+        forum_hash: &ContentHash,
+        cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<PaginatedResult<BoardGenesis>> {
+        let forum_prefix = forum_hash.as_bytes();
+
+        // Build the seek key for iteration
+        // Index key format: forum_hash (64) + inverted_timestamp (8) + board_hash (64) = 136 bytes
+        let seek_key = if let Some(cursor) = cursor {
+            // Start just after the cursor position
+            let mut key = Vec::with_capacity(136);
+            key.extend_from_slice(forum_prefix);
+            key.extend_from_slice(&Self::invert_timestamp(cursor.timestamp));
+            key.extend_from_slice(cursor.hash.as_bytes());
+            // Increment to skip the cursor item itself
+            let mut key_bytes: [u8; 136] = key.try_into().unwrap();
+            for i in (0..136).rev() {
+                if key_bytes[i] < 255 {
+                    key_bytes[i] += 1;
+                    break;
+                }
+                key_bytes[i] = 0;
+            }
+            key_bytes.to_vec()
+        } else {
+            forum_prefix.to_vec()
+        };
+
+        // Count total (we still need to count all for the UI)
+        let mut total_count = 0;
+        self.db
+            .prefix_iterate(CF_IDX_BOARDS, forum_prefix, |key, _| {
+                if key.len() == 136 {
+                    total_count += 1;
+                }
+                true
+            })?;
+
+        // Collect only limit + 1 items starting from the cursor
+        let mut board_hashes: Vec<ContentHash> = Vec::with_capacity(limit + 1);
+        self.db
+            .seek_iterate(CF_IDX_BOARDS, &seek_key, forum_prefix, |key, _| {
+                // Key format: forum_hash (64) + inverted_timestamp (8) + board_hash (64)
+                if key.len() == 136 {
+                    let board_hash = ContentHash::from_bytes(key[72..136].try_into().unwrap());
+                    board_hashes.push(board_hash);
+                }
+                // Stop after we have enough
+                board_hashes.len() <= limit
+            })?;
+
+        let has_more = board_hashes.len() > limit;
+        let page_hashes: Vec<_> = board_hashes.into_iter().take(limit).collect();
+
+        // Load the actual board nodes
+        let mut boards = Vec::with_capacity(page_hashes.len());
+        for board_hash in &page_hashes {
+            if let Some(board) = self.get_board(forum_hash, board_hash)? {
+                boards.push(board);
+            }
+        }
+
+        // Create cursor for next page from the last loaded board
+        let next_cursor = if has_more && !boards.is_empty() {
+            let last_board = boards.last().unwrap();
+            Some(Cursor::new(last_board.created_at(), *last_board.hash()))
+        } else {
+            None
+        };
+
+        Ok(PaginatedResult {
+            items: boards,
+            next_cursor,
+            total_count: Some(total_count),
+        })
+    }
+
+    /// Gets threads in a board with cursor-based pagination.
+    ///
+    /// Threads are sorted by creation time (newest first).
+    /// Pass `None` for cursor to get the first page.
+    ///
+    /// This method is efficient: it uses sorted indexes and stops iteration
+    /// once enough items have been collected. Note that moved threads require
+    /// additional processing.
+    pub fn get_threads_paginated(
+        &self,
+        forum_hash: &ContentHash,
+        board_hash: &ContentHash,
+        cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<PaginatedResult<ThreadRoot>> {
+        let moved_threads = self.get_moved_threads(forum_hash)?;
+        let prefix = Self::thread_index_prefix(forum_hash, board_hash);
+
+        // Build the seek key for iteration
+        // Index key format: forum_hash (64) + board_hash (64) + inverted_timestamp (8) + thread_hash (64) = 200 bytes
+        let seek_key = if let Some(cursor) = cursor {
+            let mut key = Vec::with_capacity(200);
+            key.extend_from_slice(forum_hash.as_bytes());
+            key.extend_from_slice(board_hash.as_bytes());
+            key.extend_from_slice(&Self::invert_timestamp(cursor.timestamp));
+            key.extend_from_slice(cursor.hash.as_bytes());
+            // Increment to skip cursor item
+            let mut key_bytes: [u8; 200] = key.try_into().unwrap();
+            for i in (0..200).rev() {
+                if key_bytes[i] < 255 {
+                    key_bytes[i] += 1;
+                    break;
+                }
+                key_bytes[i] = 0;
+            }
+            key_bytes.to_vec()
+        } else {
+            prefix.clone()
+        };
+
+        // Count total threads for this board (excluding moved out, including moved in)
+        let mut total_count = 0;
+        self.db.prefix_iterate(CF_IDX_THREADS, &prefix, |key, _| {
+            if key.len() == 200 {
+                let thread_hash = ContentHash::from_bytes(key[136..200].try_into().unwrap());
+                // Don't count threads moved away
+                if let Some(moved_to) = moved_threads.get(&thread_hash) {
+                    if moved_to != board_hash {
+                        return true;
+                    }
+                }
+                total_count += 1;
+            }
+            true
+        })?;
+        // Add threads moved TO this board
+        for current_board in moved_threads.values() {
+            if current_board == board_hash {
+                total_count += 1;
+            }
+        }
+
+        // Collect thread hashes starting from cursor
+        let mut thread_hashes: Vec<ContentHash> = Vec::with_capacity(limit + 1);
+        self.db
+            .seek_iterate(CF_IDX_THREADS, &seek_key, &prefix, |key, _| {
+                if key.len() == 200 {
+                    let thread_hash = ContentHash::from_bytes(key[136..200].try_into().unwrap());
+                    // Skip threads moved to another board
+                    if let Some(moved_to) = moved_threads.get(&thread_hash) {
+                        if moved_to != board_hash {
+                            return true;
+                        }
+                    }
+                    thread_hashes.push(thread_hash);
+                }
+                thread_hashes.len() <= limit
+            })?;
+
+        // Handle threads moved TO this board (need to merge with results)
+        // This is more complex because moved threads might interleave with existing ones
+        // For simplicity, we include moved-in threads only on the first page
+        if cursor.is_none() {
+            for (thread_hash, current_board) in &moved_threads {
+                if current_board == board_hash && !thread_hashes.contains(thread_hash) {
+                    thread_hashes.push(*thread_hash);
+                }
+            }
+        }
+
+        let has_more = thread_hashes.len() > limit;
+        let page_hashes: Vec<_> = thread_hashes.into_iter().take(limit).collect();
+
+        // Load the actual thread nodes
+        let mut threads = Vec::with_capacity(page_hashes.len());
+        for thread_hash in &page_hashes {
+            if let Some(thread) = self.get_thread(forum_hash, thread_hash)? {
+                threads.push(thread);
+            }
+        }
+
+        // Sort by timestamp descending (needed because moved threads might be out of order)
+        threads.sort_by_key(|t| std::cmp::Reverse(t.created_at()));
+        threads.truncate(limit);
+
+        let next_cursor = if has_more && !threads.is_empty() {
+            let last_thread = threads.last().unwrap();
+            Some(Cursor::new(last_thread.created_at(), *last_thread.hash()))
+        } else {
+            None
+        };
+
+        Ok(PaginatedResult {
+            items: threads,
+            next_cursor,
+            total_count: Some(total_count),
+        })
+    }
+
+    /// Gets posts in a thread with cursor-based pagination.
+    ///
+    /// Posts are sorted by creation time (oldest first for chronological reading).
+    /// Pass `None` for cursor to get the first page.
+    ///
+    /// This method is efficient: it uses sorted indexes and stops iteration
+    /// once enough items have been collected.
+    pub fn get_posts_paginated(
+        &self,
+        forum_hash: &ContentHash,
+        thread_hash: &ContentHash,
+        cursor: Option<&Cursor>,
+        limit: usize,
+    ) -> Result<PaginatedResult<Post>> {
+        let prefix = Self::post_index_prefix(forum_hash, thread_hash);
+
+        // Build the seek key for iteration
+        // Index key format: forum_hash (64) + thread_hash (64) + timestamp (8) + post_hash (64) = 200 bytes
+        let seek_key = if let Some(cursor) = cursor {
+            let mut key = Vec::with_capacity(200);
+            key.extend_from_slice(forum_hash.as_bytes());
+            key.extend_from_slice(thread_hash.as_bytes());
+            key.extend_from_slice(&cursor.timestamp.to_be_bytes()); // Non-inverted for ascending
+            key.extend_from_slice(cursor.hash.as_bytes());
+            // Increment to skip cursor item
+            let mut key_bytes: [u8; 200] = key.try_into().unwrap();
+            for i in (0..200).rev() {
+                if key_bytes[i] < 255 {
+                    key_bytes[i] += 1;
+                    break;
+                }
+                key_bytes[i] = 0;
+            }
+            key_bytes.to_vec()
+        } else {
+            prefix.clone()
+        };
+
+        // Count total posts for this thread
+        let mut total_count = 0;
+        self.db.prefix_iterate(CF_IDX_POSTS, &prefix, |key, _| {
+            if key.len() == 200 {
+                total_count += 1;
+            }
+            true
+        })?;
+
+        // Collect only limit + 1 items starting from the cursor
+        let mut post_hashes: Vec<ContentHash> = Vec::with_capacity(limit + 1);
+        self.db
+            .seek_iterate(CF_IDX_POSTS, &seek_key, &prefix, |key, _| {
+                // Key format: forum_hash (64) + thread_hash (64) + timestamp (8) + post_hash (64)
+                if key.len() == 200 {
+                    let post_hash = ContentHash::from_bytes(key[136..200].try_into().unwrap());
+                    post_hashes.push(post_hash);
+                }
+                post_hashes.len() <= limit
+            })?;
+
+        let has_more = post_hashes.len() > limit;
+        let page_hashes: Vec<_> = post_hashes.into_iter().take(limit).collect();
+
+        // Load the actual post nodes
+        let mut posts = Vec::with_capacity(page_hashes.len());
+        for post_hash in &page_hashes {
+            if let Some(post) = self.load_post(forum_hash, post_hash)? {
+                posts.push(post);
+            }
+        }
+
+        let next_cursor = if has_more && !posts.is_empty() {
+            let last_post = posts.last().unwrap();
+            Some(Cursor::new(last_post.created_at(), *last_post.hash()))
+        } else {
+            None
+        };
+
+        Ok(PaginatedResult {
+            items: posts,
+            next_cursor,
+            total_count: Some(total_count),
+        })
     }
 
     /// Gets a specific board by hash.
@@ -486,19 +1487,47 @@ impl ForumStorage {
         Ok(node.and_then(|n| n.as_post().cloned()))
     }
 
-    /// Gets all mod actions for a forum.
+    /// Gets all mod actions for a forum, sorted by creation time.
+    ///
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_mod_actions(&self, forum_hash: &ContentHash) -> Result<Vec<ModActionNode>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let actions: Vec<ModActionNode> = nodes
-            .into_iter()
-            .filter_map(|n| n.as_mod_action().cloned())
-            .collect();
+        // Collect mod action hashes and timestamps from the index
+        let mut action_entries: Vec<(ContentHash, u64)> = Vec::new();
+        self.db
+            .prefix_iterate(CF_IDX_MOD_ACTIONS, forum_hash.as_bytes(), |key, value| {
+                // Key is forum_hash (64 bytes) + action_hash (64 bytes) = 128 bytes
+                if key.len() == 128 {
+                    let action_hash = ContentHash::from_bytes(key[64..128].try_into().unwrap());
+                    let timestamp = if value.len() == 8 {
+                        u64::from_be_bytes(value.try_into().unwrap())
+                    } else {
+                        0
+                    };
+                    action_entries.push((action_hash, timestamp));
+                }
+                true // continue iteration
+            })?;
+
+        // Sort by timestamp ascending (oldest first for replay order)
+        action_entries.sort_by_key(|(_, ts)| *ts);
+
+        // Load the actual mod action nodes
+        let mut actions = Vec::with_capacity(action_entries.len());
+        for (action_hash, _) in action_entries {
+            if let Some(node) = self.load_node(forum_hash, &action_hash)? {
+                if let Some(action) = node.as_mod_action() {
+                    actions.push(action.clone());
+                }
+            }
+        }
+
         Ok(actions)
     }
 
     /// Gets the effective board name and description after applying edits.
     ///
     /// Returns (name, description) with the most recent edit values applied.
+    /// Uses the edit index for O(edits_for_board) instead of O(all_nodes).
     pub fn get_effective_board_info(
         &self,
         forum_hash: &ContentHash,
@@ -510,19 +1539,24 @@ impl ForumStorage {
             None => return Ok(None),
         };
 
+        self.apply_board_edits(forum_hash, &board)
+    }
+
+    /// Applies edits to a board that's already loaded.
+    ///
+    /// This avoids reloading the board from disk when it's already available.
+    pub fn apply_board_edits(
+        &self,
+        forum_hash: &ContentHash,
+        board: &BoardGenesis,
+    ) -> Result<Option<(String, String)>> {
         let mut name = board.name().to_string();
         let mut description = board.description().to_string();
 
-        // Get all edit nodes for this board, sorted by timestamp (newest last)
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let mut edits: Vec<&EditNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_edit())
-            .filter(|e| e.target_hash() == board_hash)
-            .collect();
-        edits.sort_by_key(|e| e.created_at());
+        // Get edits for this board from the index
+        let edits = self.get_edits_for_target(forum_hash, board.hash())?;
 
-        // Apply edits in order (most recent wins)
+        // Apply edits in order (already sorted by timestamp, most recent wins)
         for edit in edits {
             if let Some(new_name) = edit.new_name() {
                 name = new_name.to_string();
@@ -535,9 +1569,52 @@ impl ForumStorage {
         Ok(Some((name, description)))
     }
 
+    /// Gets all edit nodes for a specific target, sorted by creation time.
+    ///
+    /// Uses the edit index for O(edits_for_target) instead of O(all_nodes).
+    fn get_edits_for_target(
+        &self,
+        forum_hash: &ContentHash,
+        target_hash: &ContentHash,
+    ) -> Result<Vec<EditNode>> {
+        let prefix = Self::edit_index_prefix(forum_hash, target_hash);
+        let mut edit_entries: Vec<(ContentHash, u64)> = Vec::new();
+
+        self.db
+            .prefix_iterate(CF_IDX_EDITS, &prefix, |key, value| {
+                // Key is forum_hash (64) + target_hash (64) + edit_hash (64) = 192 bytes
+                if key.len() == 192 {
+                    let edit_hash = ContentHash::from_bytes(key[128..192].try_into().unwrap());
+                    let timestamp = if value.len() == 8 {
+                        u64::from_be_bytes(value.try_into().unwrap())
+                    } else {
+                        0
+                    };
+                    edit_entries.push((edit_hash, timestamp));
+                }
+                true // continue iteration
+            })?;
+
+        // Sort by timestamp ascending (oldest first for replay order)
+        edit_entries.sort_by_key(|(_, ts)| *ts);
+
+        // Load the actual edit nodes
+        let mut edits = Vec::with_capacity(edit_entries.len());
+        for (edit_hash, _) in edit_entries {
+            if let Some(node) = self.load_node(forum_hash, &edit_hash)? {
+                if let Some(edit) = node.as_edit() {
+                    edits.push(edit.clone());
+                }
+            }
+        }
+
+        Ok(edits)
+    }
+
     /// Gets the effective forum name and description after applying edits.
     ///
     /// Returns (name, description) with the most recent edit values applied.
+    /// Uses the edit index for O(edits_for_forum) instead of O(all_nodes).
     pub fn get_effective_forum_info(
         &self,
         forum_hash: &ContentHash,
@@ -551,16 +1628,10 @@ impl ForumStorage {
         let mut name = metadata.name;
         let mut description = metadata.description;
 
-        // Get all edit nodes for this forum, sorted by timestamp (newest last)
-        let nodes = self.load_forum_nodes(forum_hash)?;
-        let mut edits: Vec<&EditNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_edit())
-            .filter(|e| e.target_hash() == forum_hash) // Forum edits target the forum itself
-            .collect();
-        edits.sort_by_key(|e| e.created_at());
+        // Get edits for this forum from the index (forum edits target the forum itself)
+        let edits = self.get_edits_for_target(forum_hash, forum_hash)?;
 
-        // Apply edits in order (most recent wins)
+        // Apply edits in order (already sorted by timestamp, most recent wins)
         for edit in edits {
             if let Some(new_name) = edit.new_name() {
                 name = new_name.to_string();
@@ -576,17 +1647,14 @@ impl ForumStorage {
     /// Computes the current forum-level moderators by replaying mod actions.
     ///
     /// Returns (moderator_fingerprints, owner_fingerprint) where owner is the forum creator.
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_forum_moderators(
         &self,
         forum_hash: &ContentHash,
     ) -> Result<(HashSet<String>, Option<String>)> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
-        // Find the forum genesis to get the owner
-        let owner_fingerprint = nodes
-            .iter()
-            .filter_map(|n| n.as_forum_genesis())
-            .next()
+        // Get the forum genesis to find the owner
+        let owner_fingerprint = self
+            .load_forum(forum_hash)?
             .map(|g| fingerprint_from_identity(g.creator_identity()));
 
         // Build set of moderators by replaying add/remove actions
@@ -597,15 +1665,14 @@ impl ForumStorage {
             moderators.insert(owner_fp.clone());
         }
 
-        // Sort mod actions by creation time to replay in order
-        let mut mod_actions: Vec<&ModActionNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_mod_action())
-            .filter(|m| m.board_hash().is_none()) // Forum-level only
-            .collect();
-        mod_actions.sort_by_key(|m| m.created_at());
+        // Get mod actions from index (already sorted by timestamp)
+        let mod_actions = self.get_mod_actions(forum_hash)?;
 
+        // Filter to forum-level only and replay
         for action in mod_actions {
+            if action.board_hash().is_some() {
+                continue; // Skip board-level actions
+            }
             let target_fp = fingerprint_from_identity(action.target_identity());
             match action.action() {
                 ModAction::AddModerator => {
@@ -625,24 +1692,23 @@ impl ForumStorage {
     }
 
     /// Computes the current board-level moderators by replaying mod actions.
+    ///
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_board_moderators(
         &self,
         forum_hash: &ContentHash,
         board_hash: &ContentHash,
     ) -> Result<HashSet<String>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
         let mut moderators: HashSet<String> = HashSet::new();
 
-        // Sort mod actions by creation time to replay in order
-        let mut mod_actions: Vec<&ModActionNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_mod_action())
-            .filter(|m| m.board_hash() == Some(board_hash))
-            .collect();
-        mod_actions.sort_by_key(|m| m.created_at());
+        // Get mod actions from index (already sorted by timestamp)
+        let mod_actions = self.get_mod_actions(forum_hash)?;
 
+        // Filter to this board only and replay
         for action in mod_actions {
+            if action.board_hash() != Some(board_hash) {
+                continue;
+            }
             let target_fp = fingerprint_from_identity(action.target_identity());
             match action.action() {
                 ModAction::AddBoardModerator => {
@@ -659,17 +1725,13 @@ impl ForumStorage {
     }
 
     /// Gets set of hidden thread hashes.
+    ///
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_hidden_threads(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
         let mut hidden: HashSet<ContentHash> = HashSet::new();
 
-        let mut mod_actions: Vec<&ModActionNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_mod_action())
-            .filter(|m| matches!(m.action(), ModAction::HideThread | ModAction::UnhideThread))
-            .collect();
-        mod_actions.sort_by_key(|m| m.created_at());
+        // Get mod actions from index (already sorted by timestamp)
+        let mod_actions = self.get_mod_actions(forum_hash)?;
 
         for action in mod_actions {
             if let Some(target_hash) = action.target_node_hash() {
@@ -689,17 +1751,13 @@ impl ForumStorage {
     }
 
     /// Gets set of hidden post hashes.
+    ///
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_hidden_posts(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
         let mut hidden: HashSet<ContentHash> = HashSet::new();
 
-        let mut mod_actions: Vec<&ModActionNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_mod_action())
-            .filter(|m| matches!(m.action(), ModAction::HidePost | ModAction::UnhidePost))
-            .collect();
-        mod_actions.sort_by_key(|m| m.created_at());
+        // Get mod actions from index (already sorted by timestamp)
+        let mod_actions = self.get_mod_actions(forum_hash)?;
 
         for action in mod_actions {
             if let Some(target_hash) = action.target_node_hash() {
@@ -719,17 +1777,13 @@ impl ForumStorage {
     }
 
     /// Gets set of hidden board hashes.
+    ///
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_hidden_boards(&self, forum_hash: &ContentHash) -> Result<HashSet<ContentHash>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
         let mut hidden: HashSet<ContentHash> = HashSet::new();
 
-        let mut mod_actions: Vec<&ModActionNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_mod_action())
-            .filter(|m| matches!(m.action(), ModAction::HideBoard | ModAction::UnhideBoard))
-            .collect();
-        mod_actions.sort_by_key(|m| m.created_at());
+        // Get mod actions from index (already sorted by timestamp)
+        let mod_actions = self.get_mod_actions(forum_hash)?;
 
         for action in mod_actions {
             if let Some(board_hash) = action.board_hash() {
@@ -752,24 +1806,21 @@ impl ForumStorage {
     ///
     /// MoveThread actions update the board that a thread belongs to.
     /// The most recent MoveThread action for each thread determines its current board.
+    /// Uses the mod action index for O(mod_actions) instead of O(all_nodes).
     pub fn get_moved_threads(
         &self,
         forum_hash: &ContentHash,
     ) -> Result<HashMap<ContentHash, ContentHash>> {
-        let nodes = self.load_forum_nodes(forum_hash)?;
-
-        // Get all MoveThread actions sorted by timestamp
-        let mut move_actions: Vec<&ModActionNode> = nodes
-            .iter()
-            .filter_map(|n| n.as_mod_action())
-            .filter(|m| m.action() == ModAction::MoveThread)
-            .collect();
-        move_actions.sort_by_key(|m| m.created_at());
+        // Get mod actions from index (already sorted by timestamp)
+        let mod_actions = self.get_mod_actions(forum_hash)?;
 
         // Build map of thread -> current board (last move wins)
         let mut moved: HashMap<ContentHash, ContentHash> = HashMap::new();
 
-        for action in move_actions {
+        for action in mod_actions {
+            if action.action() != ModAction::MoveThread {
+                continue;
+            }
             if let (Some(thread_hash), Some(dest_board_hash)) =
                 (action.target_node_hash(), action.board_hash())
             {
