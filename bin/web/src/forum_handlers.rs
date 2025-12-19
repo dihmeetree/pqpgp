@@ -242,6 +242,7 @@ pub async fn sync_forum(
 /// - O(log n) seek on the relay using timestamp index
 /// - Fixed-size requests regardless of DAG complexity
 /// - Nodes come directly in response (no separate fetch needed)
+/// - Incremental: resumes from stored cursor position
 async fn sync_forum_with_cursor(
     persistence: &SharedForumPersistence,
     forum_hash: &ContentHash,
@@ -249,16 +250,20 @@ async fn sync_forum_with_cursor(
     let http_client = Client::new();
     let rpc_client = create_rpc_client();
 
-    // Use cursor-based sync: start from timestamp 0 for initial sync
-    // TODO: Store and resume from last sync cursor for incremental sync
-    let mut cursor_timestamp: u64 = 0;
-    let mut cursor_hash: Option<ContentHash> = None;
+    // Load stored cursor for incremental sync (resumes from last position)
+    let (mut cursor_timestamp, mut cursor_hash) =
+        persistence.get_sync_cursor(forum_hash).unwrap_or((0, None));
     let mut total_stored = 0;
     let mut total_rejected = 0;
 
     info!(
-        "Syncing forum {} with cursor-based sync",
-        forum_hash.short()
+        "Syncing forum {} with cursor ts={}, hash={}",
+        forum_hash.short(),
+        cursor_timestamp,
+        cursor_hash
+            .as_ref()
+            .map(|h| h.short())
+            .unwrap_or("none".to_string())
     );
 
     loop {
@@ -326,6 +331,16 @@ async fn sync_forum_with_cursor(
         }
     }
 
+    // Save cursor for next incremental sync
+    if let Err(e) = persistence.set_sync_cursor(forum_hash, cursor_timestamp, cursor_hash.as_ref())
+    {
+        warn!(
+            "Forum {}: failed to save sync cursor: {}",
+            forum_hash.short(),
+            e
+        );
+    }
+
     if total_rejected > 0 {
         info!(
             "Forum {}: rejected {} invalid nodes during sync",
@@ -335,9 +350,14 @@ async fn sync_forum_with_cursor(
     }
 
     info!(
-        "Forum {}: synced {} nodes successfully",
+        "Forum {}: synced {} nodes (cursor ts={}, hash={})",
         forum_hash.short(),
-        total_stored
+        total_stored,
+        cursor_timestamp,
+        cursor_hash
+            .as_ref()
+            .map(|h| h.short())
+            .unwrap_or("none".to_string())
     );
 
     Ok(total_stored)
