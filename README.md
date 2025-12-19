@@ -523,7 +523,8 @@ bin/web/
     ├── storage.rs    # Encrypted persistent storage for chat
     ├── csrf.rs       # CSRF protection
     ├── rate_limiter.rs # Request rate limiting
-    ├── forum_handlers.rs  # Forum web handlers with sync and validation logic
+    ├── handlers/     # HTTP handlers
+    │   └── forum.rs  # Forum web handlers with sync and validation logic
     ├── templates.rs  # Askama template definitions
     └── templates/    # HTML templates (forum, chat, keys, etc.)
 ```
