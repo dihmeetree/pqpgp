@@ -143,14 +143,18 @@ async fn attack_replay_node(
     let forum_hash = simulation.forum_hash().ok_or("No forum")?;
 
     // Get existing nodes from the forum (from Alice's relay which has all content)
-    let sync_result = simulation.alice_relay().sync_forum(forum_hash, &[]).await?;
+    // Using cursor-based sync: timestamp=0 means get all nodes from beginning
+    let sync_result = simulation
+        .alice_relay()
+        .sync_forum(forum_hash, 0, None)
+        .await?;
 
-    if sync_result.missing_hashes.is_empty() {
+    if sync_result.nodes.is_empty() {
         return Ok(true); // No nodes to replay
     }
 
-    // Fetch an existing node
-    let hash = ContentHash::from_hex(&sync_result.missing_hashes[0])?;
+    // Use the first node from the sync result
+    let hash = ContentHash::from_hex(&sync_result.nodes[0].hash)?;
     let fetch_result = simulation.alice_relay().fetch_nodes(&[hash]).await?;
 
     if fetch_result.nodes.is_empty() {
@@ -222,7 +226,6 @@ async fn attack_wrong_forum(
         fake_forum,
         "Malicious Board".to_string(),
         "Board for wrong forum".to_string(),
-        vec![],
         eve_keypair.public_key(),
         eve_keypair.private_key(),
         None,
@@ -320,7 +323,6 @@ async fn attack_permission_escalation(
         *forum_hash,
         "Eve's Unauthorized Board".to_string(),
         "Board created without permission".to_string(),
-        vec![],
         eve_keypair.public_key(),
         eve_keypair.private_key(),
         None,
@@ -969,7 +971,6 @@ async fn attack_content_size_boundary(
         *forum_hash,
         oversized_name,
         "Normal description".to_string(),
-        vec![],
         eve_keypair.public_key(),
         eve_keypair.private_key(),
         None,

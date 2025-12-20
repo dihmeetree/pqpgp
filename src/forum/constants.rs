@@ -22,12 +22,6 @@ pub const MAX_THREAD_BODY_SIZE: usize = 100 * 1024;
 /// Maximum post body size (100KB).
 pub const MAX_POST_BODY_SIZE: usize = 100 * 1024;
 
-/// Maximum number of tags per board.
-pub const MAX_TAGS_COUNT: usize = 10;
-
-/// Maximum length of a single tag (64 bytes).
-pub const MAX_TAG_SIZE: usize = 64;
-
 // =============================================================================
 // DAG Limits
 // =============================================================================
@@ -60,6 +54,11 @@ pub const MAX_FETCH_BATCH_SIZE: usize = 1000;
 /// Maximum number of missing hashes returned in a sync response.
 pub const MAX_SYNC_MISSING_HASHES: usize = 10000;
 
+/// Maximum number of known_heads allowed in a sync request.
+/// This prevents excessively large requests that could exceed body limits.
+/// If a client has more heads, it should send multiple requests or use pagination.
+pub const MAX_SYNC_KNOWN_HEADS: usize = 10000;
+
 /// Maximum nodes returned in a single export page.
 pub const MAX_EXPORT_PAGE_SIZE: usize = 1000;
 
@@ -88,9 +87,6 @@ pub const MAX_HASH_INPUT_SIZE: usize = 128;
 
 /// Maximum password input size.
 pub const MAX_PASSWORD_SIZE: usize = 1024;
-
-/// Maximum tags input size (comma-separated).
-pub const MAX_TAGS_INPUT_SIZE: usize = 1024;
 
 // =============================================================================
 // Display Constants

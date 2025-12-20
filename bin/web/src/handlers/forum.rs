@@ -7,8 +7,9 @@ use crate::csrf::{get_csrf_token, validate_csrf_token, CsrfProtectedForm};
 use crate::templates::{
     BoardDisplayInfo, BoardViewTemplate, ConversationInfo, EncryptionIdentityInfo,
     ForumDisplayInfo, ForumListTemplate, ForumViewTemplate, ModeratorDisplayInfo,
-    PMComposeTemplate, PMConversationTemplate, PMInboxTemplate, PMRecipientInfo, PostDisplayInfo,
-    PrivateMessageInfo, SigningKeyInfo, ThreadDisplayInfo, ThreadViewTemplate,
+    MoveThreadTemplate, PMComposeTemplate, PMConversationTemplate, PMInboxTemplate,
+    PMRecipientInfo, PostDisplayInfo, PrivateMessageInfo, SigningKeyInfo, ThreadDisplayInfo,
+    ThreadViewTemplate,
 };
 use crate::AppState;
 use crate::SharedForumPersistence;
@@ -16,17 +17,17 @@ use askama::Template;
 use axum::{
     extract::{Form, Path, Query, State},
     http::StatusCode,
-    response::{Html, IntoResponse, Redirect},
+    response::{Html, IntoResponse, Json, Redirect},
 };
 use pqpgp::cli::utils::create_keyring_manager;
 use pqpgp::crypto::Password;
 use pqpgp::forum::{
     constants::{
         MAX_DESCRIPTION_SIZE, MAX_HASH_INPUT_SIZE, MAX_NAME_SIZE, MAX_PASSWORD_SIZE,
-        MAX_POST_BODY_SIZE, MAX_TAGS_INPUT_SIZE, MAX_THREAD_BODY_SIZE, MAX_THREAD_TITLE_SIZE,
+        MAX_POST_BODY_SIZE, MAX_THREAD_BODY_SIZE, MAX_THREAD_TITLE_SIZE,
     },
     permissions::ForumPermissions,
-    rpc_client::{FetchResult, ForumRpcClient, RpcRequest, RpcResponse, SyncResult},
+    rpc_client::{ForumRpcClient, RpcRequest, RpcResponse, SyncResult},
     seal_private_message,
     storage::{Cursor, DEFAULT_PAGE_SIZE},
     types::current_timestamp_millis,
@@ -36,16 +37,9 @@ use pqpgp::forum::{
     ModAction, ModActionNode, Post, PrivateMessageScanner, SealedPrivateMessage, StoredMessage,
     ThreadRoot,
 };
-use std::collections::{HashMap, HashSet};
-
-// =============================================================================
-// Security Constants
-// =============================================================================
-
-/// Maximum recursion depth for sync (prevents infinite loops from malicious relays).
-const MAX_SYNC_DEPTH: usize = 100;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tower_sessions::Session;
 use tracing::{error, info, warn};
 
@@ -115,32 +109,8 @@ fn build_board_display_info_from_summary(summary: &pqpgp::forum::BoardSummary) -
         hash: summary.board.hash().to_hex(),
         name: summary.effective_name.clone(),
         description: summary.effective_description.clone(),
-        tags: summary.board.tags().to_vec(),
         created_at_display: format_timestamp(summary.board.created_at()),
         thread_count: summary.thread_count,
-    }
-}
-
-/// Builds a BoardDisplayInfo with edits applied (for single board lookups).
-/// Note: thread_count is set to 0 since this is used for single board lookups
-/// where we don't need to display thread counts (e.g., move thread dropdown).
-fn build_board_display_info(
-    persistence: &SharedForumPersistence,
-    forum_hash: &ContentHash,
-    board: &BoardGenesis,
-) -> BoardDisplayInfo {
-    let (name, description) = persistence
-        .apply_board_edits(forum_hash, board)
-        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
-        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
-
-    BoardDisplayInfo {
-        hash: board.hash().to_hex(),
-        name,
-        description,
-        tags: board.tags().to_vec(),
-        created_at_display: format_timestamp(board.created_at()),
-        thread_count: 0, // Not needed for single board lookups
     }
 }
 
@@ -227,11 +197,10 @@ fn get_signing_key_fingerprint(signing_key_id: &str) -> Option<String> {
 ///
 /// This implements the full sync protocol:
 /// 1. Get local heads from storage
-/// 2. Send SyncRequest to relay with known heads
-/// 3. Receive list of missing node hashes
-/// 4. Fetch missing nodes from relay
-/// 5. Validate and store nodes locally (topological order)
-/// 6. Update local heads (only with validated, stored hashes)
+/// 2. Send cursor-based SyncRequest to relay (timestamp, hash cursor)
+/// 3. Receive nodes directly in batched responses
+/// 4. Validate and store nodes locally (topological order)
+/// 5. Update local heads from DAG structure
 ///
 /// Nodes are validated using the shared validation logic from pqpgp::forum::validation.
 /// Invalid nodes are rejected and not stored.
@@ -241,116 +210,144 @@ pub async fn sync_forum(
     persistence: &SharedForumPersistence,
     forum_hash: &ContentHash,
 ) -> Result<usize, String> {
-    sync_forum_with_depth(persistence, forum_hash, 0).await
+    sync_forum_with_cursor(persistence, forum_hash).await
 }
 
-/// Internal sync implementation with recursion depth tracking.
-async fn sync_forum_with_depth(
+/// Internal sync implementation using cursor-based pagination.
+///
+/// Cursor-based sync is more efficient than head-based sync because:
+/// - O(log n) seek on the relay using timestamp index
+/// - Fixed-size requests regardless of DAG complexity
+/// - Nodes come directly in response (no separate fetch needed)
+/// - Incremental: resumes from stored cursor position
+async fn sync_forum_with_cursor(
     persistence: &SharedForumPersistence,
     forum_hash: &ContentHash,
-    depth: usize,
 ) -> Result<usize, String> {
-    // Prevent infinite recursion from malicious relay
-    if depth >= MAX_SYNC_DEPTH {
-        warn!(
-            "Forum {}: max sync depth {} reached, stopping",
-            forum_hash.short(),
-            MAX_SYNC_DEPTH
-        );
-        return Ok(0);
-    }
-
     let http_client = Client::new();
     let rpc_client = create_rpc_client();
 
-    // Step 1: Build sync request with known heads
-    let known_heads = persistence
-        .get_heads(forum_hash)
-        .map_err(|e| e.to_string())?;
-    let known_heads_vec: Vec<ContentHash> = known_heads.into_iter().collect();
+    // Load stored cursor for incremental sync (resumes from last position)
+    let (mut cursor_timestamp, mut cursor_hash) =
+        persistence.get_sync_cursor(forum_hash).unwrap_or((0, None));
+    let mut total_stored = 0;
+    let mut total_rejected = 0;
 
     info!(
-        "Syncing forum {}: sending {} known heads (depth {})",
+        "Syncing forum {} with cursor ts={}, hash={}",
         forum_hash.short(),
-        known_heads_vec.len(),
-        depth
+        cursor_timestamp,
+        cursor_hash
+            .as_ref()
+            .map(|h| h.short())
+            .unwrap_or("none".to_string())
     );
 
-    // Step 2: Send sync request to relay via JSON-RPC
-    let sync_request = rpc_client.build_sync_request(forum_hash, &known_heads_vec, None);
-    let sync_rpc_response = send_rpc_request(&http_client, &rpc_client, &sync_request).await?;
-    let sync_result: SyncResult = rpc_client
-        .parse_sync_response(sync_rpc_response)
-        .map_err(|e| format!("Failed to parse sync response: {}", e))?;
+    loop {
+        // Send cursor-based sync request to relay
+        let sync_request = rpc_client.build_sync_request(
+            forum_hash,
+            cursor_timestamp,
+            cursor_hash.as_ref(),
+            None, // Use default batch size
+        );
+        let sync_rpc_response = send_rpc_request(&http_client, &rpc_client, &sync_request).await?;
+        let sync_result: SyncResult = rpc_client
+            .parse_sync_response(sync_rpc_response)
+            .map_err(|e| format!("Failed to parse sync response: {}", e))?;
 
-    // Step 3: Filter out nodes we already have and deduplicate
-    let missing_hashes = sync_result.parse_missing_hashes();
-    let mut nodes_to_fetch: Vec<ContentHash> = Vec::new();
-    let mut seen: HashSet<ContentHash> = HashSet::new();
-    for hash in &missing_hashes {
-        if !seen.contains(hash) && !persistence.node_exists(forum_hash, hash).unwrap_or(false) {
-            nodes_to_fetch.push(*hash);
-            seen.insert(*hash);
+        if sync_result.nodes.is_empty() {
+            info!("Forum {} is up to date", forum_hash.short());
+            break;
         }
-    }
 
-    if nodes_to_fetch.is_empty() {
-        info!("Forum {} is already up to date", forum_hash.short());
-        // Only update heads with hashes that exist locally (security: don't trust relay blindly)
-        let local_nodes = persistence
-            .load_forum_nodes(forum_hash)
-            .map_err(|e| e.to_string())?;
-        let local_hashes: HashSet<ContentHash> = local_nodes.iter().map(|n| *n.hash()).collect();
-        let server_heads = sync_result.parse_server_heads();
-        let verified_heads: HashSet<ContentHash> = server_heads
-            .into_iter()
-            .filter(|h| local_hashes.contains(h))
-            .collect();
-        if !verified_heads.is_empty() {
-            persistence
-                .set_heads(forum_hash, &verified_heads)
-                .map_err(|e| e.to_string())?;
-        }
-        return Ok(0);
-    }
-
-    info!(
-        "Forum {}: fetching {} missing nodes",
-        forum_hash.short(),
-        nodes_to_fetch.len()
-    );
-
-    // Step 4: Fetch missing nodes via JSON-RPC
-    let fetch_request = rpc_client.build_fetch_request(&nodes_to_fetch);
-    let fetch_rpc_response = send_rpc_request(&http_client, &rpc_client, &fetch_request).await?;
-    let fetch_result: FetchResult = rpc_client
-        .parse_fetch_response(fetch_rpc_response)
-        .map_err(|e| format!("Failed to parse fetch response: {}", e))?;
-
-    if !fetch_result.not_found.is_empty() {
-        warn!(
-            "Forum {}: {} nodes not found on relay",
+        info!(
+            "Forum {}: received {} nodes (has_more={})",
             forum_hash.short(),
-            fetch_result.not_found.len()
+            sync_result.nodes.len(),
+            sync_result.has_more
+        );
+
+        // Deserialize nodes from this batch
+        let fetched_nodes = sync_result
+            .deserialize_nodes()
+            .map_err(|e| format!("Failed to deserialize nodes: {}", e))?;
+
+        // Filter out nodes we already have and deduplicate
+        let mut deserialized_map: HashMap<ContentHash, DagNode> = HashMap::new();
+        for (hash, node) in fetched_nodes {
+            if !persistence.node_exists(forum_hash, &hash).unwrap_or(false) {
+                deserialized_map.entry(hash).or_insert(node);
+            }
+        }
+
+        if deserialized_map.is_empty() {
+            // All nodes in this batch already exist locally
+            // Update cursor and continue to next batch
+            cursor_timestamp = sync_result.next_cursor_timestamp;
+            cursor_hash = sync_result.parse_next_cursor_hash();
+            if !sync_result.has_more {
+                break;
+            }
+            continue;
+        }
+
+        // Process this batch of nodes
+        let (stored, rejected) =
+            process_node_batch(persistence, forum_hash, deserialized_map).await?;
+        total_stored += stored;
+        total_rejected += rejected;
+
+        // Update cursor for next batch
+        cursor_timestamp = sync_result.next_cursor_timestamp;
+        cursor_hash = sync_result.parse_next_cursor_hash();
+
+        // Stop if no more batches
+        if !sync_result.has_more {
+            break;
+        }
+    }
+
+    // Save cursor for next incremental sync
+    if let Err(e) = persistence.set_sync_cursor(forum_hash, cursor_timestamp, cursor_hash.as_ref())
+    {
+        warn!(
+            "Forum {}: failed to save sync cursor: {}",
+            forum_hash.short(),
+            e
         );
     }
 
-    // Step 5: Deserialize, deduplicate, sort topologically, validate, and store nodes
-    //
-    // We need to validate and store nodes in topological order so that:
-    // - Parent nodes exist before children are validated
-    // - Permissions are computed correctly for each node
-
-    // First, deserialize all nodes and deduplicate by hash
-    let mut deserialized_map: HashMap<ContentHash, DagNode> = HashMap::new();
-    let fetched_nodes = fetch_result
-        .deserialize_nodes()
-        .map_err(|e| format!("Failed to deserialize nodes: {}", e))?;
-    for (hash, node) in fetched_nodes {
-        // Deduplicate: only keep first occurrence
-        deserialized_map.entry(hash).or_insert(node);
+    if total_rejected > 0 {
+        info!(
+            "Forum {}: rejected {} invalid nodes during sync",
+            forum_hash.short(),
+            total_rejected
+        );
     }
 
+    info!(
+        "Forum {}: synced {} nodes (cursor ts={}, hash={})",
+        forum_hash.short(),
+        total_stored,
+        cursor_timestamp,
+        cursor_hash
+            .as_ref()
+            .map(|h| h.short())
+            .unwrap_or("none".to_string())
+    );
+
+    Ok(total_stored)
+}
+
+/// Processes a batch of nodes: sorts topologically, validates, and stores.
+///
+/// Returns (stored_count, rejected_count).
+async fn process_node_batch(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+    deserialized_map: HashMap<ContentHash, DagNode>,
+) -> Result<(usize, usize), String> {
     let mut deserialized_nodes: Vec<DagNode> = deserialized_map.into_values().collect();
 
     // Sort topologically: forum genesis first, then boards, then threads, then posts/mod actions
@@ -458,47 +455,7 @@ async fn sync_forum_with_depth(
         stored += 1;
     }
 
-    if rejected > 0 {
-        info!(
-            "Forum {}: rejected {} invalid nodes during sync",
-            forum_hash.short(),
-            rejected
-        );
-    }
-
-    // Step 6: Update local heads - ONLY with hashes that exist locally
-    // Security: Don't blindly trust server_heads from relay
-    let verified_heads: HashSet<ContentHash> = sync_result
-        .parse_server_heads()
-        .into_iter()
-        .filter(|h| nodes_map.contains_key(h))
-        .collect();
-
-    if !verified_heads.is_empty() {
-        persistence
-            .set_heads(forum_hash, &verified_heads)
-            .map_err(|e| e.to_string())?;
-    }
-
-    info!(
-        "Forum {}: synced {} nodes successfully (depth {})",
-        forum_hash.short(),
-        stored,
-        depth
-    );
-
-    // If there are more nodes, sync again with incremented depth
-    if sync_result.has_more {
-        info!(
-            "Forum {}: more nodes available, continuing sync",
-            forum_hash.short()
-        );
-        let additional =
-            Box::pin(sync_forum_with_depth(persistence, forum_hash, depth + 1)).await?;
-        return Ok(stored + additional);
-    }
-
-    Ok(stored)
+    Ok((stored, rejected))
 }
 
 /// Checks if a forum exists locally (has been synced before).
@@ -534,7 +491,6 @@ pub struct CreateForumForm {
 pub struct CreateBoardForm {
     name: String,
     description: String,
-    tags: String,
     signing_key: String,
     password: Option<String>,
 }
@@ -1116,10 +1072,6 @@ pub async fn create_board_handler(
         );
         return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
     }
-    if data.tags.len() > MAX_TAGS_INPUT_SIZE {
-        warn!("Tags input too large: {} bytes", data.tags.len());
-        return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
-    }
     if data.signing_key.len() > MAX_HASH_INPUT_SIZE {
         warn!("Signing key ID too large");
         return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
@@ -1158,20 +1110,11 @@ pub async fn create_board_handler(
         .filter(|p| !p.is_empty())
         .map(|p| Password::new(p.clone()));
 
-    // Parse tags
-    let tags: Vec<String> = data
-        .tags
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     // Create board
     let board = match BoardGenesis::create(
         forum_content_hash,
         data.name.clone(),
         data.description.clone(),
-        tags,
         &signing.public_key,
         &signing.private_key,
         password.as_ref(),
@@ -1357,7 +1300,6 @@ pub async fn board_view_page(
         board_hash: board_hash.clone(),
         board_name,
         board_description,
-        board_tags: board.tags().to_vec(),
         threads,
         signing_keys,
         board_moderators,
@@ -1603,23 +1545,6 @@ pub async fn thread_view_page(
         .iter()
         .any(|mod_fp| user_fingerprints.iter().any(|fp| *fp == mod_fp));
 
-    // Load all boards for the move thread dropdown
-    let all_boards_data = app_state
-        .forum_persistence
-        .get_boards(&forum_content_hash)
-        .unwrap_or_default();
-
-    let hidden_boards = app_state
-        .forum_persistence
-        .get_hidden_boards(&forum_content_hash)
-        .unwrap_or_default();
-
-    let all_boards: Vec<BoardDisplayInfo> = all_boards_data
-        .into_iter()
-        .filter(|b| !hidden_boards.contains(b.hash()))
-        .map(|b| build_board_display_info(&app_state.forum_persistence, &forum_content_hash, &b))
-        .collect();
-
     // Get effective board name (after applying any edits)
     let (board_name, _) = app_state
         .forum_persistence
@@ -1654,7 +1579,6 @@ pub async fn thread_view_page(
         posts: post_displays,
         signing_keys,
         is_moderator,
-        all_boards,
         result: None,
         error: None,
         has_result: false,
@@ -1771,11 +1695,11 @@ pub async fn post_reply_handler(
     Redirect::to(&format!("/forum/{}/thread/{}", forum_hash, thread_hash)).into_response()
 }
 
-/// Helper to get current DAG heads from the relay for causal ordering
-async fn get_dag_heads(forum_hash: &str) -> Vec<ContentHash> {
-    let http_client = Client::new();
-    let rpc_client = create_rpc_client();
-
+/// Helper to get current DAG heads from local storage for causal ordering.
+///
+/// Heads are computed locally from the DAG structure rather than fetched from relay.
+/// A head is any node that is not referenced as a parent by another node.
+fn get_dag_heads(persistence: &SharedForumPersistence, forum_hash: &str) -> Vec<ContentHash> {
     let forum_content_hash = match ContentHash::from_hex(forum_hash) {
         Ok(h) => h,
         Err(e) => {
@@ -1784,23 +1708,15 @@ async fn get_dag_heads(forum_hash: &str) -> Vec<ContentHash> {
         }
     };
 
-    // Use sync endpoint with empty known_heads to get server's current heads
-    let request = rpc_client.build_sync_request(&forum_content_hash, &[], None);
-
-    match send_rpc_request(&http_client, &rpc_client, &request).await {
-        Ok(rpc_response) => match rpc_client.parse_sync_response(rpc_response) {
-            Ok(sync_result) => {
-                let heads = sync_result.parse_server_heads();
-                info!("Got {} DAG heads for forum {}", heads.len(), forum_hash);
-                heads
-            }
-            Err(e) => {
-                error!("Failed to parse sync response: {}", e);
-                vec![]
-            }
-        },
+    // Load heads from local storage
+    match persistence.get_heads(&forum_content_hash) {
+        Ok(heads) => {
+            let heads_vec: Vec<ContentHash> = heads.into_iter().collect();
+            info!("Got {} DAG heads for forum {}", heads_vec.len(), forum_hash);
+            heads_vec
+        }
         Err(e) => {
-            error!("Failed to fetch DAG heads: {}", e);
+            error!("Failed to get DAG heads: {}", e);
             vec![]
         }
     }
@@ -2011,7 +1927,7 @@ pub async fn add_moderator_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create mod action node
     let mod_action = match ModActionNode::create(
@@ -2134,7 +2050,7 @@ pub async fn remove_moderator_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create mod action node
     let mod_action = match ModActionNode::create(
@@ -2289,7 +2205,7 @@ pub async fn add_board_moderator_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create board mod action node
     let mod_action = match ModActionNode::create_board_action(
@@ -2430,7 +2346,7 @@ pub async fn remove_board_moderator_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create board mod action node
     let mod_action = match ModActionNode::create_board_action(
@@ -2466,7 +2382,166 @@ pub async fn remove_board_moderator_handler(
     Redirect::to(&format!("/forum/{}/board/{}", forum_hash, board_hash)).into_response()
 }
 
-/// Move thread to a different board handler
+/// Move thread page handler - shows paginated board selection for moving a thread.
+pub async fn move_thread_page_handler(
+    State(app_state): State<AppState>,
+    session: Session,
+    Path((forum_hash, thread_hash)): Path<(String, String)>,
+    Query(pagination): Query<PaginationQuery>,
+) -> Result<Html<String>, (StatusCode, String)> {
+    let csrf_token = get_csrf_token(&session, &app_state.csrf_store)
+        .await
+        .map_err(|e| (e, "Failed to get CSRF token".to_string()))?;
+
+    // Parse forum hash
+    let forum_content_hash = ContentHash::from_hex(&forum_hash).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid forum hash: {}", forum_hash),
+        )
+    })?;
+
+    // Parse thread hash
+    let thread_content_hash = ContentHash::from_hex(&thread_hash).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid thread hash: {}", thread_hash),
+        )
+    })?;
+
+    // Get forum metadata
+    let forum_metadata = match app_state
+        .forum_persistence
+        .load_forum_metadata(&forum_content_hash)
+    {
+        Ok(Some(m)) => m,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Forum not found".to_string())),
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    // Get thread
+    let thread = app_state
+        .forum_persistence
+        .get_thread(&forum_content_hash, &thread_content_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Thread not found".to_string()))?;
+
+    // Get the current board for this thread
+    let board_hash = thread.board_hash();
+    let board = app_state
+        .forum_persistence
+        .get_board(&forum_content_hash, board_hash)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "Board not found".to_string()))?;
+
+    // Check if user is a forum moderator (required for moving threads)
+    let signing_keys = get_signing_keys();
+    let user_fingerprints: Vec<&str> = signing_keys
+        .iter()
+        .map(|k| k.fingerprint.as_str())
+        .collect();
+
+    // Load forum moderators from local storage
+    let (forum_mod_fingerprints, _owner_fingerprint) = app_state
+        .forum_persistence
+        .get_forum_moderators(&forum_content_hash)
+        .unwrap_or_default();
+
+    let is_moderator = forum_mod_fingerprints
+        .iter()
+        .any(|mod_fp| user_fingerprints.iter().any(|fp| *fp == mod_fp));
+
+    if !is_moderator {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Only moderators can move threads".to_string(),
+        ));
+    }
+
+    // Get paginated boards (excluding current board and hidden boards)
+    let cursor = pagination.get_cursor();
+    let limit = pagination.get_limit();
+
+    let hidden_boards = app_state
+        .forum_persistence
+        .get_hidden_boards(&forum_content_hash)
+        .unwrap_or_default();
+
+    let paginated_result = app_state
+        .forum_persistence
+        .get_boards_paginated(&forum_content_hash, cursor.as_ref(), limit + 1)
+        .unwrap_or_else(|_| pqpgp::forum::PaginatedResult {
+            items: Vec::new(),
+            next_cursor: None,
+            total_count: None,
+        });
+
+    // Filter out current board and hidden boards, and check if there's more
+    let filtered: Vec<_> = paginated_result
+        .items
+        .into_iter()
+        .filter(|b| *b.board.hash() != *board_hash && !hidden_boards.contains(b.board.hash()))
+        .collect();
+
+    let has_more = filtered.len() > limit;
+    let boards: Vec<BoardDisplayInfo> = filtered
+        .into_iter()
+        .take(limit)
+        .map(|s| build_board_display_info_from_summary(&s))
+        .collect();
+
+    // Get next cursor from the last item we're showing
+    let next_cursor_str = if has_more {
+        paginated_result.next_cursor.map(|c| c.encode())
+    } else {
+        None
+    };
+
+    let total_boards = paginated_result.total_count.unwrap_or(0);
+
+    // Get effective names
+    let (forum_name, _) = get_effective_forum_info(
+        &app_state.forum_persistence,
+        &forum_content_hash,
+        &forum_metadata.name,
+        &forum_metadata.description,
+    );
+
+    let (board_name, _) = app_state
+        .forum_persistence
+        .apply_board_edits(&forum_content_hash, &board)
+        .unwrap_or_else(|_| Some((board.name().to_string(), board.description().to_string())))
+        .unwrap_or_else(|| (board.name().to_string(), board.description().to_string()));
+
+    let prev_cursor = pagination.prev.clone();
+    let current_cursor = pagination.cursor.clone();
+
+    let template = MoveThreadTemplate {
+        active_page: "forum".to_string(),
+        csrf_token,
+        forum_hash: forum_hash.clone(),
+        forum_name,
+        board_hash: board.hash().to_hex(),
+        board_name,
+        thread_hash: thread_hash.clone(),
+        thread_title: thread.title().to_string(),
+        boards,
+        signing_keys,
+        result: None,
+        error: None,
+        has_result: false,
+        has_error: false,
+        prev_cursor,
+        next_cursor: next_cursor_str,
+        current_cursor,
+        total_boards,
+        has_more,
+    };
+
+    Ok(Html(template.to_string()))
+}
+
+/// Move thread to a different board handler (POST)
 pub async fn move_thread_handler(
     State(app_state): State<AppState>,
     session: Session,
@@ -2563,7 +2638,7 @@ pub async fn move_thread_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create move thread action node
     let mod_action = match ModActionNode::create_move_thread_action(
@@ -2703,7 +2778,7 @@ pub async fn hide_thread_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create content action node for hiding the thread
     let mod_action = match ModActionNode::create_content_action(
@@ -2829,7 +2904,7 @@ pub async fn hide_post_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create content action node for hiding the post
     let mod_action = match ModActionNode::create_content_action(
@@ -2949,7 +3024,7 @@ pub async fn hide_board_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create hide board action node
     let mod_action = match ModActionNode::create_hide_board_action(
@@ -3071,7 +3146,7 @@ pub async fn unhide_board_handler(
         .map(|p| Password::new(p.clone()));
 
     // Get current DAG heads for causal ordering
-    let parent_hashes = get_dag_heads(&forum_hash).await;
+    let parent_hashes = get_dag_heads(&app_state.forum_persistence, &forum_hash);
 
     // Create unhide board action node
     let mod_action = match ModActionNode::create_hide_board_action(
@@ -3429,10 +3504,11 @@ pub async fn remove_forum_handler(
     Redirect::to("/forum").into_response()
 }
 
-/// Join forum by hash handler - syncs forum data from relay to local storage.
+/// Join forum by hash handler - fetches initial batch then syncs rest in background.
 ///
-/// This performs a full sync of the forum DAG, storing all nodes locally.
-/// If the forum was already synced, it will fetch any new nodes.
+/// This validates the forum exists on the relay, fetches the first batch of nodes
+/// (including the forum genesis for metadata), then lets background sync handle
+/// the rest. User is redirected quickly without waiting for full sync.
 pub async fn join_forum_handler(
     State(app_state): State<AppState>,
     session: Session,
@@ -3466,55 +3542,104 @@ pub async fn join_forum_handler(
         }
     };
 
-    // Check if already synced locally
-    let already_synced = forum_exists_locally(&app_state.forum_persistence, &forum_hash);
-    if already_synced {
-        info!("Forum {} already synced, updating...", forum_hash.short());
+    // Check if already synced locally - if so, just redirect
+    if forum_exists_locally(&app_state.forum_persistence, &forum_hash) {
+        info!("Forum {} already synced", forum_hash.short());
+        return Redirect::to(&format!("/forum/{}", forum_hash_str)).into_response();
     }
 
-    // Check if forum exists on the relay first by attempting a sync
+    // Fetch just the first batch to get the forum genesis and initial data
+    // This is quick (single request) and provides enough data to display the forum
+    match sync_forum_initial_batch(&app_state.forum_persistence, &forum_hash).await {
+        Ok(nodes_synced) => {
+            if nodes_synced > 0 {
+                info!(
+                    "Forum {} joined: {} nodes in initial batch (background sync will continue)",
+                    forum_hash.short(),
+                    nodes_synced
+                );
+                // Redirect to the forum - it now has enough data to display
+                Redirect::to(&format!("/forum/{}", forum_hash_str)).into_response()
+            } else {
+                // No nodes returned - forum doesn't exist or is empty
+                warn!("Forum not found on relay: {}", forum_hash_str);
+                Redirect::to("/forum").into_response()
+            }
+        }
+        Err(e) => {
+            error!("Failed to join forum {}: {}", forum_hash.short(), e);
+            Redirect::to("/forum").into_response()
+        }
+    }
+}
+
+/// Syncs just the first batch of nodes from a forum (non-blocking for large forums).
+///
+/// This fetches the first batch of nodes which includes the forum genesis,
+/// allowing the forum to be displayed immediately. The background sync task
+/// will continue fetching remaining nodes.
+async fn sync_forum_initial_batch(
+    persistence: &SharedForumPersistence,
+    forum_hash: &ContentHash,
+) -> Result<usize, String> {
     let http_client = Client::new();
     let rpc_client = create_rpc_client();
 
-    let check_request = rpc_client.build_sync_request(&forum_hash, &[], Some(1));
-    match send_rpc_request(&http_client, &rpc_client, &check_request).await {
-        Ok(rpc_response) => {
-            if let Err(e) = rpc_client.parse_sync_response(rpc_response) {
-                // Forum not found or other error
-                warn!("Forum not found on relay: {} - {}", forum_hash_str, e);
-                return Redirect::to("/forum").into_response();
+    // Fetch first batch starting from timestamp 0 (includes forum genesis)
+    let sync_request = rpc_client.build_sync_request(forum_hash, 0, None, Some(100));
+    let sync_rpc_response = send_rpc_request(&http_client, &rpc_client, &sync_request).await?;
+    let sync_result: SyncResult = rpc_client
+        .parse_sync_response(sync_rpc_response)
+        .map_err(|e| format!("Failed to parse sync response: {}", e))?;
+
+    if sync_result.nodes.is_empty() {
+        return Ok(0);
+    }
+
+    // Deserialize nodes
+    let fetched_nodes = sync_result
+        .deserialize_nodes()
+        .map_err(|e| format!("Failed to deserialize nodes: {}", e))?;
+
+    // Store the nodes
+    let mut stored_count = 0;
+    for (hash, node) in fetched_nodes {
+        if !persistence.node_exists(forum_hash, &hash).unwrap_or(false) {
+            if let Err(e) = persistence.store_node_for_forum(forum_hash, &node) {
+                warn!("Failed to store node {}: {}", hash.short(), e);
+                continue;
             }
-        }
-        Err(e) => {
-            error!("Connection error checking forum: {}", e);
-            return Redirect::to("/forum").into_response();
+
+            // If this is a forum genesis, store metadata to register the forum
+            if let Some(genesis) = node.as_forum_genesis() {
+                let metadata = ForumMetadata {
+                    name: genesis.name().to_string(),
+                    description: genesis.description().to_string(),
+                    created_at: genesis.created_at(),
+                    owner_identity: genesis.creator_identity().to_vec(),
+                };
+                if let Err(e) = persistence.store_forum_metadata(forum_hash, &metadata) {
+                    warn!("Failed to store forum metadata: {}", e);
+                }
+            }
+
+            stored_count += 1;
         }
     }
 
-    // Perform the sync
-    match sync_forum(&app_state.forum_persistence, &forum_hash).await {
-        Ok(nodes_synced) => {
-            if already_synced {
-                info!(
-                    "Forum {} updated: {} new nodes synced",
-                    forum_hash.short(),
-                    nodes_synced
-                );
-            } else {
-                info!(
-                    "Forum {} joined: {} nodes synced",
-                    forum_hash.short(),
-                    nodes_synced
-                );
-            }
-            Redirect::to(&format!("/forum/{}", forum_hash_str)).into_response()
-        }
-        Err(e) => {
-            error!("Failed to sync forum {}: {}", forum_hash.short(), e);
-            // Still redirect to forum page - relay might have data even if sync failed
-            Redirect::to(&format!("/forum/{}", forum_hash_str)).into_response()
+    // Save cursor for background sync to continue from
+    if sync_result.has_more {
+        if let Some(h) = sync_result.next_cursor_hash.as_ref() {
+            let cursor_hash = ContentHash::from_hex(h).ok();
+            let _ = persistence.set_sync_cursor(
+                forum_hash,
+                sync_result.next_cursor_timestamp,
+                cursor_hash.as_ref(),
+            );
         }
     }
+
+    Ok(stored_count)
 }
 
 // =============================================================================
@@ -4878,4 +5003,62 @@ pub async fn pm_delete_conversation(
         forum_hash_str
     ))
     .into_response()
+}
+
+// =============================================================================
+// Maintenance Handlers
+// =============================================================================
+
+/// Handler to recompute DAG heads for a forum.
+///
+/// This is useful when head tracking got corrupted (e.g., many heads when there
+/// should be few). It scans all nodes and identifies true heads (nodes with no children).
+pub async fn recompute_heads_handler(
+    State(app_state): State<AppState>,
+    Path(forum_hash_str): Path<String>,
+) -> impl IntoResponse {
+    let forum_hash = match ContentHash::from_hex(&forum_hash_str) {
+        Ok(h) => h,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "Invalid forum hash" })),
+            )
+                .into_response();
+        }
+    };
+
+    let persistence = &app_state.forum_persistence;
+
+    // Get current head count for comparison
+    let old_head_count = persistence
+        .get_heads(&forum_hash)
+        .map(|h| h.len())
+        .unwrap_or(0);
+
+    match persistence.recompute_heads(&forum_hash) {
+        Ok(new_head_count) => {
+            info!(
+                "Recomputed heads for forum {}: {} -> {} heads",
+                forum_hash.short(),
+                old_head_count,
+                new_head_count
+            );
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "success": true,
+                    "forum_hash": forum_hash_str,
+                    "old_head_count": old_head_count,
+                    "new_head_count": new_head_count
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Failed to recompute heads: {}", e) })),
+        )
+            .into_response(),
+    }
 }

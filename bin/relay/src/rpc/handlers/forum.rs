@@ -3,15 +3,14 @@
 use super::{parse_params, to_json};
 use crate::rpc::state::{acquire_forum_read, acquire_forum_write, SharedForumState};
 use base64::Engine;
-use pqpgp::forum::constants::{
-    MAX_EXPORT_PAGE_SIZE, MAX_FETCH_BATCH_SIZE, MAX_NODES_PER_FORUM, MAX_SYNC_MISSING_HASHES,
-};
-use pqpgp::forum::dag_ops::{compute_missing, nodes_in_topological_order};
+use pqpgp::forum::constants::{MAX_EXPORT_PAGE_SIZE, MAX_FETCH_BATCH_SIZE, MAX_NODES_PER_FORUM};
+use pqpgp::forum::dag_ops::nodes_in_topological_order;
 use pqpgp::forum::permissions::ForumPermissions;
 use pqpgp::forum::rpc_client::{
     ExportParams, ExportResult, FetchParams, FetchResult, ForumInfo, NodeData, SubmitParams,
     SubmitResult, SyncParams, SyncResult,
 };
+use pqpgp::forum::sync::{DEFAULT_SYNC_BATCH_SIZE, MAX_SYNC_BATCH_SIZE};
 use pqpgp::forum::types::current_timestamp_millis;
 use pqpgp::forum::{
     validate_content_limits, validate_node, ContentHash, DagNode, ForumGenesis, ValidationContext,
@@ -46,11 +45,19 @@ pub fn handle_sync(state: &SharedForumState, params: Value) -> Result<Value, Rpc
     let forum_hash = ContentHash::from_hex(&params.forum_hash)
         .map_err(|_| RpcError::invalid_params("Invalid forum hash"))?;
 
-    let known_heads: Vec<ContentHash> = params
-        .known_heads
-        .iter()
-        .filter_map(|h| ContentHash::from_hex(h).ok())
-        .collect();
+    // Parse cursor hash if provided
+    let cursor_hash = params
+        .cursor_hash
+        .as_ref()
+        .map(|h| ContentHash::from_hex(h))
+        .transpose()
+        .map_err(|_| RpcError::invalid_params("Invalid cursor hash"))?;
+
+    // Apply batch size limits
+    let batch_size = params
+        .batch_size
+        .unwrap_or(DEFAULT_SYNC_BATCH_SIZE)
+        .min(MAX_SYNC_BATCH_SIZE);
 
     let relay = acquire_forum_read(state);
 
@@ -58,32 +65,42 @@ pub fn handle_sync(state: &SharedForumState, params: Value) -> Result<Value, Rpc
         .get_forum(&forum_hash)
         .ok_or_else(|| RpcError::not_found("Forum not found"))?;
 
-    let mut missing = compute_missing(&forum.nodes, &known_heads);
+    // Get nodes after cursor using timestamp index
+    let (nodes, has_more) =
+        forum.get_nodes_after_cursor(params.cursor_timestamp, cursor_hash.as_ref(), batch_size);
 
-    let client_max = params.max_results.unwrap_or(MAX_SYNC_MISSING_HASHES);
-    let effective_max = client_max.min(MAX_SYNC_MISSING_HASHES);
+    // Serialize nodes for response
+    let mut node_data = Vec::with_capacity(nodes.len());
+    let mut next_cursor_timestamp = params.cursor_timestamp;
+    let mut next_cursor_hash = None;
 
-    let has_more = if missing.len() > effective_max {
-        missing.truncate(effective_max);
-        true
-    } else {
-        false
-    };
-
-    let server_heads: Vec<String> = forum.heads.iter().map(|h| h.to_hex()).collect();
+    for node in &nodes {
+        if let Ok(data) = node.to_bytes() {
+            node_data.push(NodeData {
+                hash: node.hash().to_hex(),
+                data: base64::engine::general_purpose::STANDARD.encode(&data),
+            });
+            // Update cursor to last node
+            next_cursor_timestamp = node.created_at();
+            next_cursor_hash = Some(node.hash().to_hex());
+        }
+    }
 
     info!(
-        "forum.sync: {} missing {} nodes (has_more={})",
+        "forum.sync: {} returned {} nodes (cursor_ts={}, has_more={})",
         forum_hash.short(),
-        missing.len(),
+        node_data.len(),
+        params.cursor_timestamp,
         has_more
     );
 
     let result = SyncResult {
         forum_hash: params.forum_hash,
-        missing_hashes: missing.iter().map(|h| h.to_hex()).collect(),
-        server_heads,
+        nodes: node_data,
+        next_cursor_timestamp,
+        next_cursor_hash,
         has_more,
+        total_nodes: Some(forum.node_count()),
     };
 
     to_json(result)
@@ -107,27 +124,32 @@ pub fn handle_fetch(state: &SharedForumState, params: Value) -> Result<Value, Rp
 
     let relay = acquire_forum_read(state);
 
-    // Build a temporary index for O(1) lookups instead of O(n*m) nested iteration
-    let node_index: HashMap<&ContentHash, &DagNode> = relay
-        .forums()
-        .values()
-        .flat_map(|forum| forum.nodes.iter())
-        .collect();
-
+    // Search for nodes directly in each forum's HashMap.
+    // This is O(h * f) where h = requested hashes and f = number of forums.
+    // Much more efficient than building a global index O(total_nodes) per request.
     let mut nodes = Vec::with_capacity(unique_hashes.len());
     let mut not_found = Vec::new();
 
     for hash in unique_hashes {
-        if let Some(node) = node_index.get(&hash) {
-            if let Ok(data) = node.to_bytes() {
-                nodes.push(NodeData {
-                    hash: hash.to_hex(),
-                    data: base64::engine::general_purpose::STANDARD.encode(&data),
-                });
-            } else {
-                not_found.push(hash.to_hex());
+        let mut found = false;
+
+        // Search each forum for this hash
+        // Typically a fetch request targets nodes from a single forum,
+        // so we'll usually find it in the first forum we check.
+        for forum in relay.forums().values() {
+            if let Some(node) = forum.nodes.get(&hash) {
+                if let Ok(data) = node.to_bytes() {
+                    nodes.push(NodeData {
+                        hash: hash.to_hex(),
+                        data: base64::engine::general_purpose::STANDARD.encode(&data),
+                    });
+                    found = true;
+                    break;
+                }
             }
-        } else {
+        }
+
+        if !found {
             not_found.push(hash.to_hex());
         }
     }

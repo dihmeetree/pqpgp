@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://i.imgur.com/3Bbddk7.png" alt="PQPGP" width="850">
+  <img src="https://i.imgur.com/OFuj3X3.jpeg" alt="PQPGP" width="850">
 </p>
 
 A post-quantum secure implementation of PGP (Pretty Good Privacy) in Rust, providing quantum-resistant cryptographic operations while maintaining compatibility with standard PGP workflows and packet formats.
@@ -13,6 +13,7 @@ A post-quantum secure implementation of PGP (Pretty Good Privacy) in Rust, provi
 
 - **[Cryptography](docs/cryptography.md)** - Encryption, signatures, key management, ASCII armor
 - **[Forums](docs/forums.md)** - DAG structure, moderation, sync protocol
+- **[Indexes](docs/indexes.md)** - Storage indexes across client, relay, and web server
 - **[Private Messages](docs/private-messages.md)** - Sealed sender, X3DH, Double Ratchet
 - **[Relay Server](docs/relay.md)** - Message routing, forum hosting, peer sync
 - **[Simulator](docs/simulator.md)** - Multi-user testing environment, security attack simulation
@@ -208,7 +209,7 @@ PQPGP includes a cryptographically-secured forum system built on a Directed Acyc
 - **Hierarchical Structure**: Forum → Board → Thread → Post
 - **Moderation System**: Forum owners, forum moderators, and board-specific moderators
 - **Self-Describing Data**: DAG can be rebuilt from any backup without external data
-- **Sync Protocol**: Efficient head-based synchronization between clients and relay
+- **Sync Protocol**: Efficient cursor-based synchronization with batching
 - **Client-Side Storage**: Web client maintains local DAG copy for offline access
 - **Causal Ordering**: Moderation actions reference DAG heads to prevent race conditions
 - **RocksDB Storage**: High-performance relay persistence that scales to millions of posts
@@ -267,17 +268,23 @@ Forums support end-to-end encrypted private messages using a Signal-inspired sea
 
 **DAG Sync Protocol:**
 
-The sync protocol uses **heads** (nodes with no children) to efficiently determine what data needs to be transferred:
+The sync protocol uses cursor-based pagination with `(timestamp, hash)` cursors for efficient incremental sync:
 
 ```
-1. Client → Relay:  SyncRequest { forum_hash, known_heads: [...] }
-2. Relay → Client:  SyncResponse { missing_hashes: [...], server_heads: [...] }
-3. Client → Relay:  FetchNodesRequest { hashes: [...] }
-4. Relay → Client:  FetchNodesResponse { nodes: [...] }
-5. Client stores nodes and updates local heads
+1. Client → Relay:  SyncRequest { forum_hash, cursor_timestamp: 0, cursor_hash: null, batch_size: 100 }
+2. Relay → Client:  SyncResponse { nodes: [...], next_cursor_timestamp, next_cursor_hash, has_more }
+3. Client validates and stores nodes
+4. Repeat with next cursor until has_more = false
 ```
 
-This approach minimizes bandwidth by only transferring nodes the client doesn't have. Concurrent posts from different users create valid DAG branches that merge on sync.
+**Benefits:**
+
+- O(log n) relay lookup using timestamp index
+- Fixed-size requests regardless of DAG complexity
+- Nodes returned directly in sync response (no separate fetch step)
+- Cursor handles ties when multiple nodes share a timestamp
+
+Concurrent posts from different users create valid DAG branches that merge on sync.
 
 **Relay JSON-RPC 2.0 API:**
 
@@ -292,7 +299,7 @@ Methods:
   message.send     - Send message to recipient
   message.fetch    - Fetch messages for recipient
   forum.list       - List all forums
-  forum.sync       - Get missing node hashes for sync
+  forum.sync       - Cursor-based sync with batched nodes
   forum.fetch      - Fetch nodes by hash
   forum.submit     - Submit a new node
   forum.export     - Export entire forum DAG (paginated)
@@ -439,7 +446,7 @@ let ciphertext = aes_gcm.encrypt(nonce, Payload { msg, aad })?;
 
 ## Security Testing
 
-PQPGP includes a comprehensive security testing framework with **430+ tests** covering:
+PQPGP includes a comprehensive security testing framework with **470+ tests** covering:
 
 - **Input Validation**: Buffer overflow protection, bounds checking
 - **Attack Resistance**: Timing attacks, padding oracles, injection attacks
@@ -516,7 +523,8 @@ bin/web/
     ├── storage.rs    # Encrypted persistent storage for chat
     ├── csrf.rs       # CSRF protection
     ├── rate_limiter.rs # Request rate limiting
-    ├── forum_handlers.rs  # Forum web handlers with sync and validation logic
+    ├── handlers/     # HTTP handlers
+    │   └── forum.rs  # Forum web handlers with sync and validation logic
     ├── templates.rs  # Askama template definitions
     └── templates/    # HTML templates (forum, chat, keys, etc.)
 ```
@@ -578,9 +586,12 @@ Both the relay server and web client validate nodes using shared validation logi
 - Parent existence checks (DAG integrity)
 - Parent type validation (posts can only reference posts or thread roots)
 - Thread isolation (parent posts must belong to the same thread)
+- Required parent hashes (posts must have at least one parent to prevent orphaned subtrees)
+- Cycle detection (self-referencing nodes are rejected to prevent DAG corruption)
 - Permission checks (moderator actions)
 - Target validation (hide/unhide actions verify target exists and has correct type)
 - Timestamp sanity checks (±5 minute clock skew, minimum timestamp validation)
+- Timestamp monotonicity (nodes cannot have timestamps before their parents/targets)
 - Content size limits (DoS prevention)
 
 Invalid nodes are rejected and not stored, protecting against malicious relays.
