@@ -26,59 +26,62 @@
       }
       .social-links {
         display: flex;
-        width: 725px;
         flex-direction: row;
-        gap: 32px;
-        justify-content: space-between;
-        align-items: center;
+        gap: 24px;
         margin-top: 30px;
-      }
-      .social-link {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        text-decoration: none;
-        color: #3d3d3d;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
           sans-serif;
-        font-size: 24px;
-        transition: color 0.2s ease;
       }
-      .social-link:hover {
-        color: #000;
+      .social-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        text-decoration: none;
+        transition: transform 0.2s ease;
       }
-      .social-link .icon {
+      .social-item:hover {
+        transform: translateY(-4px);
+      }
+      .social-item .icon {
         display: flex;
         align-items: center;
         justify-content: center;
-        width: 48px;
-        height: 48px;
-        border-radius: 50%;
+      }
+      .social-item .icon svg {
+        width: 64px;
+        height: 64px;
+        fill: #3d3d3d;
+        transition: fill 0.2s ease;
+      }
+      .social-item.twitter:hover .icon svg {
+        fill: #000;
+      }
+      .social-item.github:hover .icon svg {
+        fill: #24292e;
+      }
+      .social-item.reddit:hover .icon svg {
+        fill: #ff4500;
+      }
+      .social-item .pill {
         background: #3d3d3d;
-        transition: background 0.2s ease, transform 0.2s ease;
+        color: #fff;
+        border-radius: 50px;
+        font-size: 22px;
+        font-weight: 500;
+        padding: 8px 0 14px 0;
+        width: 148px;
+        text-align: center;
+        transition: background 0.2s ease;
       }
-      .social-link:hover .icon {
-        transform: scale(1.1);
-      }
-      .social-link.twitter:hover .icon {
+      .social-item.twitter:hover .pill {
         background: #000;
       }
-      .social-link.github:hover .icon {
-        background: #333;
+      .social-item.github:hover .pill {
+        background: #24292e;
       }
-      .social-link.reddit:hover .icon {
+      .social-item.reddit:hover .pill {
         background: #ff4500;
-      }
-      .social-link svg {
-        width: 24px;
-        height: 24px;
-        fill: #fff;
-      }
-      .dot {
-        width: 8px;
-        height: 8px;
-        background: #c41e3a;
-        border-radius: 50%;
       }
     </style>
   </head>
@@ -86,11 +89,10 @@
     <img class="logo" src="https://i.imgur.com/YsmM1JP.jpeg" alt="PQPGP" />
     <div class="social-links">
       <a
+        class="social-item twitter"
         href="https://x.com/p_qpgp"
-        class="social-link twitter"
         target="_blank"
         rel="noopener noreferrer"
-        title="Follow on X"
       >
         <span class="icon">
           <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -99,15 +101,13 @@
             />
           </svg>
         </span>
-        @p_qpgp
+        <span class="pill">@p_qpgp</span>
       </a>
-      <span class="dot"></span>
       <a
-        href="https://github.com/pqpgp"
-        class="social-link github"
+        class="social-item github"
+        href="https://github.com/pqpgp/pqpgp"
         target="_blank"
         rel="noopener noreferrer"
-        title="View on GitHub"
       >
         <span class="icon">
           <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -116,15 +116,13 @@
             />
           </svg>
         </span>
-        @pqpgp
+        <span class="pill">@pqpgp</span>
       </a>
-      <span class="dot"></span>
       <a
+        class="social-item reddit"
         href="https://reddit.com/r/pqpgp"
-        class="social-link reddit"
         target="_blank"
         rel="noopener noreferrer"
-        title="Join on Reddit"
       >
         <span class="icon">
           <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
@@ -133,7 +131,7 @@
             />
           </svg>
         </span>
-        r/pqpgp
+        <span class="pill">r/pqpgp</span>
       </a>
     </div>
   </body>
