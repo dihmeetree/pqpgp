@@ -305,13 +305,22 @@ pub fn validate_post(post: &Post, ctx: &ValidationContext) -> Result<ValidationR
         ));
     }
 
-    // Validate parent hash count
+    // Validate parent hash count - too many
     if post.parent_hashes().len() > MAX_PARENT_HASHES {
         result.add_error(format!(
             "Too many parent hashes: {} (max {})",
             post.parent_hashes().len(),
             MAX_PARENT_HASHES
         ));
+    }
+
+    // SECURITY FIX: Require at least one parent hash to prevent orphaned subtrees
+    // Posts must reference at least their thread root or another post in the thread
+    // This ensures all posts are connected to the DAG through the thread root
+    if post.parent_hashes().is_empty() {
+        result.add_error(
+            "Post must have at least one parent hash (thread root or parent post)".to_string(),
+        );
     }
 
     // Validate timestamp is reasonable
@@ -696,6 +705,47 @@ pub fn validate_mod_action(
         result.add_error("Moderation action timestamp is too far in the future".to_string());
     }
 
+    // SECURITY FIX: Validate timestamp monotonicity with target nodes
+    // A moderation action cannot have an earlier timestamp than the nodes it targets
+    // This prevents backdated moderation actions that could cause replay inconsistencies
+    if let Some(target_hash) = action.target_node_hash() {
+        if let Some(target_node) = ctx.get_node(target_hash) {
+            if action.created_at() < target_node.created_at() {
+                result.add_error(format!(
+                    "Moderation action timestamp {} is before target node timestamp {}",
+                    action.created_at(),
+                    target_node.created_at()
+                ));
+            }
+        }
+    }
+
+    // Also validate timestamp against board_hash target for board actions
+    if let Some(board_hash) = action.board_hash() {
+        if let Some(board_node) = ctx.get_node(board_hash) {
+            if action.created_at() < board_node.created_at() {
+                result.add_error(format!(
+                    "Moderation action timestamp {} is before target board timestamp {}",
+                    action.created_at(),
+                    board_node.created_at()
+                ));
+            }
+        }
+    }
+
+    // Validate timestamp monotonicity with parent nodes (causal ordering)
+    for parent_hash in action.parent_hashes() {
+        if let Some(parent_node) = ctx.get_node(parent_hash) {
+            if action.created_at() < parent_node.created_at() {
+                result.add_error(format!(
+                    "Moderation action timestamp {} is before parent node timestamp {}",
+                    action.created_at(),
+                    parent_node.created_at()
+                ));
+            }
+        }
+    }
+
     Ok(result)
 }
 
@@ -814,9 +864,22 @@ pub fn validate_edit(edit: &EditNode, ctx: &ValidationContext) -> Result<Validat
         result.add_error("No permission state found for forum".to_string());
     }
 
-    // Validate timestamp
+    // Validate timestamp not too far in the future
     if edit.created_at() > ctx.current_time_ms + MAX_CLOCK_SKEW_MS {
         result.add_error("Edit timestamp is too far in the future".to_string());
+    }
+
+    // SECURITY FIX: Validate timestamp monotonicity with target node
+    // An edit cannot have an earlier timestamp than the node it modifies
+    // This prevents backdated edits that could cause replay inconsistencies
+    if let Some(target_node) = ctx.get_node(target_hash) {
+        if edit.created_at() < target_node.created_at() {
+            result.add_error(format!(
+                "Edit timestamp {} is before target node timestamp {}",
+                edit.created_at(),
+                target_node.created_at()
+            ));
+        }
     }
 
     Ok(result)
