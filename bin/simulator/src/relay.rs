@@ -223,6 +223,14 @@ impl SimulatorRelay {
             .map_err(|e| format!("Failed to parse sync result: {}", e))
     }
 
+    /// Sends a raw RPC request and returns the response (for malicious testing).
+    ///
+    /// This allows tests to send arbitrary RPC requests to test edge cases
+    /// and attack scenarios that the typed API doesn't support.
+    pub async fn send_rpc_request(&self, request: &RpcRequest) -> Result<RpcResponse, String> {
+        self.send_request(request).await
+    }
+
     /// Submits raw data as a node (for malicious testing).
     pub async fn submit_raw(&self, forum_hash: &str, node_data: &str) -> Result<Value, String> {
         let request = pqpgp::rpc::RpcRequest::new(

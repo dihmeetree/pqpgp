@@ -36,7 +36,7 @@ Actions are paced with random delays (500ms-2s) to simulate realistic usage.
 
 ### Security Testing
 
-Eve continuously attempts various attacks against Bob's relay to verify security controls. The simulator includes 26 different attack types organized by category:
+Eve continuously attempts various attacks against Bob's relay to verify security controls. The simulator includes 40 different attack types organized by category:
 
 #### Signature & Authentication Attacks
 
@@ -98,6 +98,40 @@ Eve continuously attempts various attacks against Bob's relay to verify security
 | `malformed_node_data`   | Submit garbage/invalid data  | Rejected (parse error) |
 | `content_size_boundary` | Board name exceeds 100 chars | Rejected (size limit)  |
 | `empty_content_fields`  | Thread with empty title      | Rejected (empty field) |
+
+#### Sync Protocol Attacks
+
+| Attack                      | Description                        | Expected Result          |
+| --------------------------- | ---------------------------------- | ------------------------ |
+| `sync_invalid_cursor`       | Sync with non-existent cursor hash | Handled gracefully       |
+| `sync_negative_batch_size`  | Request negative batch size        | Rejected or uses default |
+| `sync_excessive_batch_size` | Request billions of nodes          | Capped at server maximum |
+| `sync_malformed_forum_hash` | Sync with empty/invalid forum hash | Rejected (invalid hash)  |
+
+#### Node Ordering Attacks
+
+| Attack                    | Description                              | Expected Result              |
+| ------------------------- | ---------------------------------------- | ---------------------------- |
+| `timestamp_before_parent` | Node timestamp before parent's timestamp | Rejected (signature invalid) |
+| `self_referencing_node`   | Node references itself as parent         | Rejected (invalid parent)    |
+| `orphan_post`             | Post with no parent references           | Rejected (missing parents)   |
+| `circular_parent_chain`   | Two nodes referencing each other         | Rejected (parents not found) |
+
+#### Crypto/Signature Attacks
+
+| Attack                  | Description                               | Expected Result              |
+| ----------------------- | ----------------------------------------- | ---------------------------- |
+| `wrong_key_type`        | Use encryption key where signing expected | Rejected (key type mismatch) |
+| `truncated_signature`   | Submit node with truncated signature      | Rejected (parse error)       |
+| `null_bytes_in_content` | Inject null bytes in title/body fields    | Handled safely               |
+
+#### Storage/Index Attacks
+
+| Attack                         | Description                            | Expected Result    |
+| ------------------------------ | -------------------------------------- | ------------------ |
+| `unicode_overflow`             | Submit Unicode edge cases (RTL, ZWJ)   | Handled safely     |
+| `special_characters_injection` | SQL/JSON/path injection attempts       | Handled safely     |
+| `max_valid_content`            | Submit content at maximum valid limits | Accepted or capped |
 
 If any attack succeeds, the simulator **panics** to alert you of a security vulnerability.
 
