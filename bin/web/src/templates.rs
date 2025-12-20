@@ -187,7 +187,6 @@ pub struct BoardDisplayInfo {
     pub hash: String,
     pub name: String,
     pub description: String,
-    pub tags: Vec<String>,
     pub created_at_display: String,
     pub thread_count: usize,
 }
@@ -279,7 +278,6 @@ pub struct BoardViewTemplate {
     pub board_hash: String,
     pub board_name: String,
     pub board_description: String,
-    pub board_tags: Vec<String>,
     pub threads: Vec<ThreadDisplayInfo>,
     pub signing_keys: Vec<SigningKeyInfo>,
     pub board_moderators: Vec<ModeratorDisplayInfo>,

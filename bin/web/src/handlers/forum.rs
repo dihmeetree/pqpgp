@@ -24,7 +24,7 @@ use pqpgp::crypto::Password;
 use pqpgp::forum::{
     constants::{
         MAX_DESCRIPTION_SIZE, MAX_HASH_INPUT_SIZE, MAX_NAME_SIZE, MAX_PASSWORD_SIZE,
-        MAX_POST_BODY_SIZE, MAX_TAGS_INPUT_SIZE, MAX_THREAD_BODY_SIZE, MAX_THREAD_TITLE_SIZE,
+        MAX_POST_BODY_SIZE, MAX_THREAD_BODY_SIZE, MAX_THREAD_TITLE_SIZE,
     },
     permissions::ForumPermissions,
     rpc_client::{ForumRpcClient, RpcRequest, RpcResponse, SyncResult},
@@ -109,7 +109,6 @@ fn build_board_display_info_from_summary(summary: &pqpgp::forum::BoardSummary) -
         hash: summary.board.hash().to_hex(),
         name: summary.effective_name.clone(),
         description: summary.effective_description.clone(),
-        tags: summary.board.tags().to_vec(),
         created_at_display: format_timestamp(summary.board.created_at()),
         thread_count: summary.thread_count,
     }
@@ -492,7 +491,6 @@ pub struct CreateForumForm {
 pub struct CreateBoardForm {
     name: String,
     description: String,
-    tags: String,
     signing_key: String,
     password: Option<String>,
 }
@@ -1074,10 +1072,6 @@ pub async fn create_board_handler(
         );
         return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
     }
-    if data.tags.len() > MAX_TAGS_INPUT_SIZE {
-        warn!("Tags input too large: {} bytes", data.tags.len());
-        return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
-    }
     if data.signing_key.len() > MAX_HASH_INPUT_SIZE {
         warn!("Signing key ID too large");
         return Redirect::to(&format!("/forum/{}", forum_hash)).into_response();
@@ -1116,20 +1110,11 @@ pub async fn create_board_handler(
         .filter(|p| !p.is_empty())
         .map(|p| Password::new(p.clone()));
 
-    // Parse tags
-    let tags: Vec<String> = data
-        .tags
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
     // Create board
     let board = match BoardGenesis::create(
         forum_content_hash,
         data.name.clone(),
         data.description.clone(),
-        tags,
         &signing.public_key,
         &signing.private_key,
         password.as_ref(),
@@ -1315,7 +1300,6 @@ pub async fn board_view_page(
         board_hash: board_hash.clone(),
         board_name,
         board_description,
-        board_tags: board.tags().to_vec(),
         threads,
         signing_keys,
         board_moderators,

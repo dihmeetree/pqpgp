@@ -14,8 +14,7 @@ use crate::crypto::PublicKey;
 use crate::error::{PqpgpError, Result};
 use crate::forum::constants::{
     MAX_CLOCK_SKEW_MS, MAX_DESCRIPTION_SIZE, MAX_NAME_SIZE, MAX_PARENT_HASHES, MAX_POST_BODY_SIZE,
-    MAX_TAGS_COUNT, MAX_TAG_SIZE, MAX_THREAD_BODY_SIZE, MAX_THREAD_TITLE_SIZE,
-    MIN_VALID_TIMESTAMP_MS,
+    MAX_THREAD_BODY_SIZE, MAX_THREAD_TITLE_SIZE, MIN_VALID_TIMESTAMP_MS,
 };
 use crate::forum::permissions::ForumPermissions;
 use crate::forum::{
@@ -966,17 +965,6 @@ pub fn validate_content_limits(node: &DagNode) -> Option<String> {
                     MAX_DESCRIPTION_SIZE
                 ));
             }
-            if board.tags().len() > MAX_TAGS_COUNT {
-                return Some(format!("Board has too many tags (max {})", MAX_TAGS_COUNT));
-            }
-            for tag in board.tags() {
-                if tag.len() > MAX_TAG_SIZE {
-                    return Some(format!(
-                        "Tag exceeds maximum length of {} bytes",
-                        MAX_TAG_SIZE
-                    ));
-                }
-            }
             if board.created_at() < MIN_VALID_TIMESTAMP_MS {
                 return Some("Board timestamp is unreasonably old".to_string());
             }
@@ -1088,7 +1076,6 @@ mod tests {
             *forum.hash(),
             "Test Board".to_string(),
             "A test board".to_string(),
-            vec![],
             keypair.public_key(),
             keypair.private_key(),
             None,
@@ -1117,7 +1104,6 @@ mod tests {
             *forum.hash(),
             "Test Board".to_string(),
             "A test board".to_string(),
-            vec![],
             other_keypair.public_key(),
             other_keypair.private_key(),
             None,
@@ -1144,7 +1130,6 @@ mod tests {
             *forum.hash(),
             "Test Board".to_string(),
             "".to_string(),
-            vec![],
             keypair.public_key(),
             keypair.private_key(),
             None,
@@ -1181,7 +1166,6 @@ mod tests {
             *forum.hash(),
             "Test Board".to_string(),
             "".to_string(),
-            vec![],
             keypair.public_key(),
             keypair.private_key(),
             None,
@@ -1230,7 +1214,6 @@ mod tests {
             *forum.hash(),
             "Test Board".to_string(),
             "".to_string(),
-            vec![],
             keypair.public_key(),
             keypair.private_key(),
             None,
