@@ -11,7 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 pqpgp = { path = "../.." }
-axum = "0.7"
+axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 tower = { version = "0.5", features = ["limit", "buffer"] }
 serde = { version = "1", features = ["derive"] }
