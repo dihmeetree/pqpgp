@@ -38,7 +38,7 @@ use pqpgp::forum::{
     ThreadRoot,
 };
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::collections::HashMap;
 use tower_sessions::Session;
 use tracing::{error, info, warn};
@@ -466,17 +466,6 @@ pub fn forum_exists_locally(
     persistence.forum_exists(forum_hash).unwrap_or(false)
 }
 
-/// API response for forum creation
-#[derive(Debug, Deserialize)]
-struct ForumApiResponse {
-    success: bool,
-    #[allow(dead_code)]
-    message: Option<String>,
-    error: Option<String>,
-    #[allow(dead_code)]
-    hash: Option<String>,
-}
-
 /// Form for creating a forum
 #[derive(Debug, Deserialize)]
 pub struct CreateForumForm {
@@ -846,50 +835,38 @@ pub async fn create_forum_handler(
         return Redirect::to("/forum").into_response();
     }
 
-    // Serialize and encode for relay
-    let node_bytes = match node.to_bytes() {
-        Ok(b) => b,
+    // Submit to relay via RPC
+    let http_client = Client::new();
+    let rpc_client = create_rpc_client();
+
+    // For ForumGenesis, the forum_hash is the node's own hash
+    let request = match rpc_client.build_submit_request(&forum_hash, &node) {
+        Ok(r) => r,
         Err(e) => {
-            error!("Serialization error: {}", e);
+            error!("Failed to build submit request: {}", e);
             return Redirect::to("/forum").into_response();
         }
     };
 
-    let genesis_data =
-        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &node_bytes);
-
-    // Send to relay
-    let client = Client::new();
-    let relay_url = get_relay_url();
-
-    #[derive(Serialize)]
-    struct CreateRequest {
-        genesis_data: String,
-    }
-
-    match client
-        .post(format!("{}/forums", relay_url))
-        .json(&CreateRequest { genesis_data })
-        .send()
-        .await
-    {
-        Ok(resp) => match resp.json::<ForumApiResponse>().await {
-            Ok(api_resp) => {
-                if api_resp.success {
-                    info!("Created forum: {}", data.name);
-                } else {
-                    error!(
-                        "Forum creation failed: {}",
-                        api_resp.error.unwrap_or_default()
+    match send_rpc_request(&http_client, &rpc_client, &request).await {
+        Ok(rpc_response) => match rpc_client.parse_submit_response(rpc_response) {
+            Ok(result) => {
+                if result.accepted {
+                    info!(
+                        "Created forum '{}' on relay: {}",
+                        data.name,
+                        forum_hash.short()
                     );
+                } else {
+                    error!("Forum creation rejected by relay");
                 }
             }
             Err(e) => {
-                error!("API error: {}", e);
+                error!("Forum creation failed: {}", e);
             }
         },
         Err(e) => {
-            error!("Connection error: {}", e);
+            error!("Failed to submit forum to relay: {}", e);
         }
     }
 
