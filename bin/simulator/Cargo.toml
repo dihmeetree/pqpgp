@@ -25,6 +25,6 @@ rand = "0.9"
 hex = "0.4"
 rocksdb = "0.24"
 num_cpus = "1.16"
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.13", features = ["json"] }
 tempfile = "3"
 fastrand = "2"
